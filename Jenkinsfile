@@ -2,7 +2,8 @@
   Jenkins declarative pipeline: verify client build, build Docker image, optional push.
 
   Agent requirements:
-  - Docker CLI and access to a Docker daemon for the "Docker build" stage.
+  - Docker CLI and daemon for "Verify client build" (docker run node image) and "Docker build".
+  - No Docker Pipeline plugin required; stages use plain `docker` commands on agent any.
 
   Optional image push (CD):
   - Job / folder environment:
@@ -44,17 +45,15 @@ pipeline {
       when {
         expression { return env.SKIP_CLIENT_VERIFY != 'true' }
       }
-      agent {
-        docker {
-          image 'node:20-bookworm-slim'
-          reuseNode true
-        }
-      }
       steps {
-        dir('client') {
-          sh 'npm ci'
-          sh 'npm run build'
-        }
+        sh """
+          set -e
+          docker run --rm \\
+            -v "${env.WORKSPACE}:/ws" \\
+            -w /ws/client \\
+            node:20-bookworm-slim \\
+            bash -lc 'npm ci && npm run build'
+        """
       }
     }
 
