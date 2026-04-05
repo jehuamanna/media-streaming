@@ -67,6 +67,13 @@ node index.js
 
 For hot reload on the UI, run the Vite dev server in another terminal (`cd client && npm run dev`) and keep the API on 8020; Vite proxies `/api` and `/hls` to **http://127.0.0.1:8020** (see `client/vite.config.ts`).
 
-## CI/CD
+## CI/CD (Jenkins)
 
-See **[Jenkinsfile](Jenkinsfile)** at the repository root. The pipeline can verify the client build, build the Docker image, and optionally push to a registry when credentials and environment variables are configured (details in the Jenkinsfile header comment).
+The **[Jenkinsfile](Jenkinsfile)** pipeline:
+
+1. **Checkout** SCM  
+2. **Verify client build** — `npm ci` and `npm run build` in `client/` (inside a `node:20-bookworm-slim` container). Set job env `SKIP_CLIENT_VERIFY=true` to skip.  
+3. **Docker build** — `docker build` tagging `media-streaming:<branch>-<build>-<gitsha>` and `media-streaming:latest`. Override short name with env `IMAGE_NAME`.  
+4. **Docker push** (optional) — only if `DOCKER_REGISTRY` is set (e.g. `ghcr.io/myorg`) **and** the branch is `main` or `master`. Requires username/password credentials whose ID defaults to `docker-registry` (override with `DOCKER_REGISTRY_CREDS_ID`). For `docker login`, the host is `DOCKER_LOGIN_HOST` if set, otherwise the first segment of `DOCKER_REGISTRY` (e.g. `ghcr.io`). Set `SKIP_DOCKER_PUSH=true` to disable pushing.
+
+Create a **Multibranch Pipeline** or **Pipeline** job pointing at this repo. The agent must run **Docker** for the image build. The **Verify client build** stage uses `agent { docker { image 'node:20-bookworm-slim' } }`, which needs the **Docker Pipeline** plugin (or an equivalent setup). If that is not available, set **`SKIP_CLIENT_VERIFY=true`** and rely on the Dockerfile’s internal client build.

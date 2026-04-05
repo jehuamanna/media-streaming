@@ -1,20 +1,18 @@
-/* groovylint-disable LineLength */
 /*
   Jenkins declarative pipeline: verify client build, build Docker image, optional push.
 
-  Required on the Jenkins agent:
-  - Docker CLI (and daemon or Docker-in-Docker) for the "Docker build" stage.
+  Agent requirements:
+  - Docker CLI and access to a Docker daemon for the "Docker build" stage.
 
-  Optional CD (image push):
-  - Credentials ID "docker-registry" (username/password) for your registry, OR set DOCKER_REGISTRY_CREDS_ID.
-  - Environment (job or folder):
-      DOCKER_REGISTRY   e.g. registry.example.com:5000/your-org
-      IMAGE_NAME        image repository name (default: media-streaming)
-  - Pushes only when BRANCH_NAME is "main" or "master" (adjust "when" below if needed).
+  Optional image push (CD):
+  - Job / folder environment:
+      DOCKER_REGISTRY   Full image prefix without image name, e.g. ghcr.io/myorg or docker.io/myuser
+  - Credentials (username/password) with ID "docker-registry", or set DOCKER_REGISTRY_CREDS_ID.
+  - Push runs only for branches main or master (edit the "when" block to match your workflow).
 
-  Optional overrides:
-      SKIP_CLIENT_VERIFY = true   # skip npm ci + client build on agent (Dockerfile still builds inside image)
-      SKIP_DOCKER_PUSH   = true   # never push
+  Optional flags:
+      SKIP_CLIENT_VERIFY = true   # skip npm ci + client build on the agent
+      SKIP_DOCKER_PUSH   = true   # never push, even on main/master
 */
 
 pipeline {
@@ -29,7 +27,6 @@ pipeline {
   environment {
     DOCKER_BUILDKIT = '1'
     IMAGE_NAME = "${env.IMAGE_NAME ?: 'media-streaming'}"
-    REGISTRY_PREFIX = "${env.DOCKER_REGISTRY ? env.DOCKER_REGISTRY + '/' : ''}"
     GIT_SHORT = "${env.GIT_COMMIT ? env.GIT_COMMIT.take(7) : 'nogit'}"
     TAG = "${env.BRANCH_NAME ?: 'unknown'}-${env.BUILD_NUMBER}-${GIT_SHORT}"
     LOCAL_IMAGE = "${IMAGE_NAME}:${TAG}"
@@ -63,10 +60,8 @@ pipeline {
 
     stage('Docker build') {
       steps {
-        script {
-          sh "docker build -t ${LOCAL_IMAGE} ."
-          sh "docker tag ${LOCAL_IMAGE} ${IMAGE_NAME}:latest"
-        }
+        sh "docker build -t ${env.LOCAL_IMAGE} ."
+        sh "docker tag ${env.LOCAL_IMAGE} ${env.IMAGE_NAME}:latest"
       }
     }
 
@@ -83,20 +78,27 @@ pipeline {
       }
       steps {
         script {
-          def remote = "${REGISTRY_PREFIX}${IMAGE_NAME}"
-          sh "docker tag ${LOCAL_IMAGE} ${remote}:${TAG}"
-          sh "docker tag ${LOCAL_IMAGE} ${remote}:latest"
-          withCredentials([usernamePassword(
-            credentialsId: REGISTRY_CREDS,
-            usernameVariable: 'DOCKER_USER',
-            passwordVariable: 'DOCKER_PASS',
-          )]) {
-            sh '''
-              echo "$DOCKER_PASS" | docker login "$DOCKER_REGISTRY" -u "$DOCKER_USER" --password-stdin
-            '''
+          def remoteImage = "${env.DOCKER_REGISTRY}/${env.IMAGE_NAME}"
+          withCredentials([
+            usernamePassword(
+              credentialsId: env.REGISTRY_CREDS,
+              usernameVariable: 'DOCKER_USER',
+              passwordVariable: 'DOCKER_PASS',
+            ),
+          ]) {
+            sh """
+              set -e
+              REMOTE='${remoteImage}'
+              TAG='${env.TAG}'
+              LOCAL='${env.LOCAL_IMAGE}'
+              LOGIN_HOST="\${DOCKER_LOGIN_HOST:-\$(echo -n '${env.DOCKER_REGISTRY}' | cut -d/ -f1)}"
+              docker tag "\$LOCAL" "\$REMOTE:\$TAG"
+              docker tag "\$LOCAL" "\$REMOTE:latest"
+              echo "\$DOCKER_PASS" | docker login "\$LOGIN_HOST" -u "\$DOCKER_USER" --password-stdin
+              docker push "\$REMOTE:\$TAG"
+              docker push "\$REMOTE:latest"
+            """
           }
-          sh "docker push ${remote}:${TAG}"
-          sh "docker push ${remote}:latest"
         }
       }
     }
@@ -104,10 +106,7 @@ pipeline {
 
   post {
     success {
-      echo "Image: ${LOCAL_IMAGE} (also tagged ${IMAGE_NAME}:latest)"
-    }
-    cleanup {
-      cleanWs()
+      echo "Built image: ${env.LOCAL_IMAGE} (also ${env.IMAGE_NAME}:latest)"
     }
   }
 }
