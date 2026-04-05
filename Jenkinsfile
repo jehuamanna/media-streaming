@@ -67,8 +67,8 @@ pipeline {
           if (!br) {
             br = 'local'
           }
-          def short = env.GIT_COMMIT ? env.GIT_COMMIT.take(7) : 'nogit'
-          env.TAG = "${br}-${env.BUILD_NUMBER}-${short}"
+          def commitShort = env.GIT_COMMIT ? env.GIT_COMMIT.take(7) : 'nogit'
+          env.TAG = "${br}-${env.BUILD_NUMBER}-${commitShort}"
           env.LOCAL_IMAGE = "${env.IMAGE_NAME}:${env.TAG}"
         }
       }
