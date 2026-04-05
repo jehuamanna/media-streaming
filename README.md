@@ -46,9 +46,10 @@ Node serves the React app and API on **8020**; nginx ingests **RTMP** on **1935*
 
 ```
 /streaming/Videos/
-  <course>/           # top-level folder = one “course” tile
-    <playlist>/       # immediate subfolder = playlist group
-      ... media files (mp4, mkv, webm, mov), nested dirs allowed
+  <course>/                    # top-level folder = one “course” tile
+    *.mp4, *.mkv, ...          # optional: media directly here (shown under “In this course”)
+    <playlist>/                # optional: subfolder = separate playlist group
+      ... media files, nested dirs allowed
 ```
 
 On the host, create **`/streaming/Videos`** (or bind another path to that mount target in Docker).

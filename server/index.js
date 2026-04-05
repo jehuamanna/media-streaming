@@ -100,7 +100,52 @@ function buildLibrary() {
         items,
       });
     }
-    playlists.sort((a, b) => a.name.localeCompare(b.name));
+
+    const rootItems = [];
+    for (const ent of plEntries) {
+      if (!ent.isFile() || ent.name.startsWith('.')) continue;
+      const ext = path.extname(ent.name).toLowerCase();
+      if (!MEDIA_EXT.has(ext)) continue;
+      const absPath = path.join(rootPath, ent.name);
+      let relFromVideos;
+      try {
+        relFromVideos = path.relative(VIDEOS_DIR, absPath).replace(/\\/g, '/');
+      } catch {
+        continue;
+      }
+      const fileId = hashFileKey(relFromVideos);
+      const title = ent.name;
+      const hlsUrl = `/hls/vod/${fileId}/index.m3u8`;
+      rootItems.push({
+        id: fileId,
+        title,
+        relativePath: relFromVideos,
+        rootId: rootName,
+        playlistId: '__root__',
+        hlsUrl,
+      });
+      fileMap.set(fileId, {
+        absPath,
+        relFromVideos,
+        rootId: rootName,
+        playlistId: '__root__',
+        title,
+      });
+    }
+    rootItems.sort((a, b) => a.title.localeCompare(b.title));
+    if (rootItems.length > 0) {
+      playlists.push({
+        id: '__root__',
+        name: 'In this course',
+        items: rootItems,
+      });
+    }
+
+    playlists.sort((a, b) => {
+      if (a.id === '__root__') return -1;
+      if (b.id === '__root__') return 1;
+      return a.name.localeCompare(b.name);
+    });
     const itemCount = playlists.reduce((n, p) => n + p.items.length, 0);
     roots.push({
       id: rootName,
