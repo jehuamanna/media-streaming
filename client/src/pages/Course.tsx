@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../api';
 import { VideoPlayer } from '../components/VideoPlayer';
 
@@ -16,7 +16,9 @@ type Root = { id: string; name: string; playlists: Playlist[] };
 
 export default function Course() {
   const { rootId: rootIdParam } = useParams<{ rootId: string }>();
+  const [searchParams] = useSearchParams();
   const rootId = rootIdParam ? decodeURIComponent(rootIdParam) : '';
+  const playFileId = searchParams.get('play');
   const [root, setRoot] = useState<Root | null>(null);
   const [progressMap, setProgressMap] = useState<Record<string, number>>({});
   const [bookmarked, setBookmarked] = useState<Set<string>>(new Set());
@@ -77,6 +79,16 @@ export default function Course() {
     const idx = all.findIndex((x) => x.id === it.id);
     setQueueIndex(idx >= 0 ? idx : 0);
   }, []);
+
+  useEffect(() => {
+    if (!root || !playFileId) return;
+    const all: Item[] = [];
+    for (const pl of root.playlists) {
+      for (const it of pl.items) all.push(it);
+    }
+    const it = all.find((x) => x.id === playFileId);
+    if (it) playItem(it, all);
+  }, [root, playFileId, playItem]);
 
   const current = queue[queueIndex] || null;
 

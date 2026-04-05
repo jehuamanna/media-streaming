@@ -244,6 +244,24 @@ button {
   border-bottom: 1px solid var(--border);
 }
 
+.continue-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.continue-list li {
+  padding: 0.4rem 0;
+}
+
+.continue-meta {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
 .admin-table {
   width: 100%;
   border-collapse: collapse;
