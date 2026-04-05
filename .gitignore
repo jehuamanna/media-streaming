@@ -7,3 +7,4 @@ server/public/*
 *.log
 data/
 Videos/
+streaming/Videos/

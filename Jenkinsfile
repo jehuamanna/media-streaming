@@ -26,7 +26,7 @@
       ADMIN_INITIAL_PASSWORD_CRED_ID
   Optional deploy paths / names (job env):
       DEPLOY_CONTAINER_NAME   default: media-streaming
-      DEPLOY_VIDEOS_PATH      host path mounted read-only as /Videos (default: ${WORKSPACE}/Videos)
+      DEPLOY_VIDEOS_PATH      host path mounted read-only as /streaming/Videos (default: /streaming/Videos)
       DEPLOY_DATA_VOLUME      named Docker volume for SQLite (default: media-streaming-data)
       DEPLOY_HOST_PORT_HTTP   host port for 8020 (default: 8020)
       DEPLOY_HOST_PORT_RTMP   host port for 1935 (default: 1935)
@@ -177,7 +177,7 @@ pipeline {
           def jwtCredId = env.JWT_SECRET_CRED_ID ?: 'media-streaming-jwt-secret'
           def adminCredId = env.ADMIN_INITIAL_PASSWORD_CRED_ID ?: 'media-streaming-admin-initial-password'
           def cname = env.DEPLOY_CONTAINER_NAME ?: 'media-streaming'
-          def videosPath = env.DEPLOY_VIDEOS_PATH ?: "${env.WORKSPACE}/Videos"
+          def videosPath = env.DEPLOY_VIDEOS_PATH ?: '/streaming/Videos'
           def dataVol = env.DEPLOY_DATA_VOLUME ?: 'media-streaming-data'
           def pHttp = env.DEPLOY_HOST_PORT_HTTP ?: '8020'
           def pRtmp = env.DEPLOY_HOST_PORT_RTMP ?: '1935'
@@ -197,7 +197,7 @@ pipeline {
                 -e ADMIN_INITIAL_PASSWORD="\$ADMIN_INITIAL_PASSWORD" \\
                 -p ${pHttp}:8020 \\
                 -p ${pRtmp}:1935 \\
-                -v "${videosPath}:/Videos:ro" \\
+                -v "${videosPath}:/streaming/Videos:ro" \\
                 -v ${dataVol}:/data \\
                 ${img}
             """

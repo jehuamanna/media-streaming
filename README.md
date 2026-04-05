@@ -1,6 +1,6 @@
 # Media streaming (live RTMP + VOD HLS)
 
-Node serves the React app and API on **8020**; nginx ingests **RTMP** on **1935** and writes live HLS to disk. VOD is transcoded from a mounted **`Videos/`** tree.
+Node serves the React app and API on **8020**; nginx ingests **RTMP** on **1935** and writes live HLS to disk. VOD is transcoded from **`/streaming/Videos`** (hardcoded default; override with `VIDEOS_DIR` if needed).
 
 ## Prerequisites
 
@@ -22,7 +22,7 @@ Node serves the React app and API on **8020**; nginx ingests **RTMP** on **1935*
      -e ADMIN_INITIAL_PASSWORD='replace-with-strong-temp-password-min-8' \
      -p 8020:8020 \
      -p 1935:1935 \
-     -v /absolute/path/to/Videos:/Videos:ro \
+     -v /streaming/Videos:/streaming/Videos:ro \
      -v media-streaming-data:/data \
      media-streaming:latest
    ```
@@ -38,18 +38,20 @@ Node serves the React app and API on **8020**; nginx ingests **RTMP** on **1935*
 | `JWT_SECRET` | Yes (min 16 chars) | Secret for signing JWTs. |
 | `ADMIN_INITIAL_PASSWORD` | Only when the DB has no admin yet | Bootstrap password for user `admin` (min 8 chars). Ignored after an admin exists. |
 | `PORT` | No | HTTP port inside the container (default **8020**). |
-| `VIDEOS_DIR` | No | Library root (default **`/Videos`**). |
+| `VIDEOS_DIR` | No | Library root (default **`/streaming/Videos`**). |
 | `HLS_VOD_DIR` | No | Cached VOD HLS output (default **`/var/hls/vod`**). |
 | `DATABASE_PATH` | No | SQLite file (default **`/data/app.db`**). Mount a volume on `/data` to persist users and progress. |
 
 ### Library layout
 
 ```
-Videos/
+/streaming/Videos/
   <course>/           # top-level folder = one “course” tile
     <playlist>/       # immediate subfolder = playlist group
       ... media files (mp4, mkv, webm, mov), nested dirs allowed
 ```
+
+On the host, create **`/streaming/Videos`** (or bind another path to that mount target in Docker).
 
 ## Local development (without Docker)
 
@@ -61,7 +63,8 @@ mkdir -p ../server/public && cp -r dist/* ../server/public/
 cd ../server && npm install
 export JWT_SECRET='dev-secret-at-least-16'
 export ADMIN_INITIAL_PASSWORD='devpass12345'
-export VIDEOS_DIR="$(pwd)/../Videos"
+sudo mkdir -p /streaming/Videos
+export VIDEOS_DIR='/streaming/Videos'
 node index.js
 ```
 
@@ -91,7 +94,7 @@ Then:
    - **`media-streaming-jwt-secret`** — value at least **16** characters (`JWT_SECRET`).
    - **`media-streaming-admin-initial-password`** — at least **8** characters; only used when the **`/data`** volume has **no** admin user yet (otherwise the app ignores it).
 
-2. Optional job env overrides: **`JWT_SECRET_CRED_ID`**, **`ADMIN_INITIAL_PASSWORD_CRED_ID`**, **`DEPLOY_CONTAINER_NAME`**, **`DEPLOY_VIDEOS_PATH`** (host path for library, default `${WORKSPACE}/Videos`), **`DEPLOY_DATA_VOLUME`** (default `media-streaming-data`), **`DEPLOY_HOST_PORT_HTTP`**, **`DEPLOY_HOST_PORT_RTMP`**, **`DEPLOY_SKIP_RM=true`** to avoid removing an existing container first.
+2. Optional job env overrides: **`JWT_SECRET_CRED_ID`**, **`ADMIN_INITIAL_PASSWORD_CRED_ID`**, **`DEPLOY_CONTAINER_NAME`**, **`DEPLOY_VIDEOS_PATH`** (host path bound to **`/streaming/Videos`** in the container, default **`/streaming/Videos`**), **`DEPLOY_DATA_VOLUME`** (default `media-streaming-data`), **`DEPLOY_HOST_PORT_HTTP`**, **`DEPLOY_HOST_PORT_RTMP`**, **`DEPLOY_SKIP_RM=true`** to avoid removing an existing container first.
 
 The stage runs **`docker run -d`** with **`${IMAGE_NAME}:latest`** (the tag produced by this pipeline).
 

@@ -11,7 +11,7 @@ import Database from 'better-sqlite3';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const PORT = Number(process.env.PORT || 8020);
-const VIDEOS_DIR = process.env.VIDEOS_DIR || '/Videos';
+const VIDEOS_DIR = process.env.VIDEOS_DIR || '/streaming/Videos';
 const HLS_VOD_DIR = process.env.HLS_VOD_DIR || '/var/hls/vod';
 const DATABASE_PATH = process.env.DATABASE_PATH || path.join(__dirname, 'data', 'app.db');
 const JWT_SECRET = process.env.JWT_SECRET;

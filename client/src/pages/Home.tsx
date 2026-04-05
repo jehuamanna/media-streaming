@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
+import { useAuth } from '../auth';
 
 type Root = { id: string; name: string; itemCount: number };
 
@@ -14,9 +15,11 @@ type ProgressRow = {
 };
 
 export default function Home() {
+  const { user } = useAuth();
   const [roots, setRoots] = useState<Root[]>([]);
   const [continueRows, setContinueRows] = useState<ProgressRow[]>([]);
   const [error, setError] = useState('');
+  const isAdmin = user?.role === 'admin';
 
   useEffect(() => {
     void (async () => {
@@ -83,7 +86,11 @@ export default function Home() {
         ))}
       </div>
       {!error && roots.length === 0 ? (
-        <p style={{ color: 'var(--muted)' }}>No folders found under Videos/. Add a root folder with playlist subfolders.</p>
+        <p style={{ color: 'var(--muted)' }}>
+          {isAdmin
+            ? 'No folders found under /streaming/Videos/. Add a root folder with playlist subfolders.'
+            : 'No courses are available at the moment.'}
+        </p>
       ) : null}
     </div>
   );
