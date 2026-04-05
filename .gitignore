@@ -1,0 +1,9 @@
+node_modules
+**/node_modules
+client/dist
+server/public/*
+!server/public/.gitkeep
+.env
+*.log
+data/
+Videos/

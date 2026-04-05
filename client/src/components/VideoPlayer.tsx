@@ -1,0 +1,146 @@
+import { useEffect, useRef } from 'react';
+import videojs from 'video.js';
+import 'video.js/dist/video-js.css';
+import { api, getToken } from '../api';
+
+type Props = {
+  src: string | null;
+  fileId: string | null;
+  onEnded?: () => void;
+};
+
+type VideoJsPlayer = ReturnType<typeof videojs>;
+
+function attachVhsAuth(player: VideoJsPlayer) {
+  const token = getToken();
+  if (!token) return;
+  const hook = (options: unknown) => {
+    const o = options as { headers?: Record<string, string> };
+    o.headers = o.headers || {};
+    o.headers.Authorization = `Bearer ${token}`;
+    return o;
+  };
+  try {
+    const tech = player.tech({ IWillNotUseThisInPlugins: true }) as unknown as {
+      vhs?: { xhr?: { beforeRequest?: (o: unknown) => unknown } };
+    };
+    if (tech?.vhs?.xhr) {
+      tech.vhs.xhr.beforeRequest = hook;
+    }
+  } catch {
+    /* ignore */
+  }
+  const Vhs = (videojs as unknown as { Vhs?: { xhr?: { beforeRequest?: (o: unknown) => unknown } } }).Vhs;
+  if (Vhs?.xhr) {
+    Vhs.xhr.beforeRequest = hook;
+  }
+}
+
+export function VideoPlayer({ src, fileId, onEnded }: Props) {
+  const videoRef = useRef<HTMLDivElement>(null);
+  const playerRef = useRef<VideoJsPlayer | null>(null);
+  const onEndedRef = useRef(onEnded);
+  onEndedRef.current = onEnded;
+
+  useEffect(() => {
+    if (!videoRef.current) return;
+    const el = document.createElement('video-js');
+    el.classList.add('vjs-big-play-centered');
+    videoRef.current.appendChild(el);
+    const player = videojs(el, {
+      controls: true,
+      responsive: true,
+      fluid: true,
+      html5: { vhs: { overrideNative: true } },
+    });
+    playerRef.current = player;
+    player.ready(() => attachVhsAuth(player));
+    player.on('ended', () => onEndedRef.current?.());
+
+    return () => {
+      player.dispose();
+      playerRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    const player = playerRef.current;
+    if (!player || !src) return;
+    attachVhsAuth(player);
+    player.src({ src, type: 'application/x-mpegURL' });
+    let cancelled = false;
+
+    (async () => {
+      if (!fileId) return;
+      try {
+        const r = await api<{
+          progress: { position_seconds: number; duration_seconds: number | null } | null;
+        }>(`/api/progress?fileId=${encodeURIComponent(fileId)}`);
+        if (cancelled || !r.progress) return;
+        const pos = r.progress.position_seconds;
+        const dur = r.progress.duration_seconds;
+        if (pos > 1 && (!dur || pos < dur - 2)) {
+          player.one('loadedmetadata', () => {
+            try {
+              player.currentTime(pos);
+            } catch {
+              /* ignore */
+            }
+          });
+        }
+      } catch {
+        /* ignore */
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [src, fileId]);
+
+  useEffect(() => {
+    const player = playerRef.current;
+    if (!player || !fileId) return;
+    let lastSent = 0;
+    const send = (force = false) => {
+      const now = Date.now();
+      if (!force && now - lastSent < 8000) return;
+      const t = player.currentTime() ?? 0;
+      const d = player.duration() ?? NaN;
+      if (!Number.isFinite(t) || t < 0) return;
+      lastSent = now;
+      void api('/api/progress', {
+        method: 'PUT',
+        json: {
+          fileId,
+          positionSeconds: t,
+          durationSeconds: Number.isFinite(d) ? d : undefined,
+        },
+      }).catch(() => {});
+    };
+    const interval = window.setInterval(() => send(false), 12000);
+    const onPause = () => send(true);
+    const onEnded = () => send(true);
+    player.on('pause', onPause);
+    player.on('ended', onEnded);
+    return () => {
+      clearInterval(interval);
+      player.off('pause', onPause);
+      player.off('ended', onEnded);
+    };
+  }, [fileId]);
+
+  if (!src) {
+    return (
+      <div className="player-wrap" style={{ minHeight: 200, display: 'grid', placeItems: 'center' }}>
+        <span style={{ color: 'var(--muted)' }}>Select a video</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="player-wrap" data-vjs-player>
+      <div ref={videoRef} />
+    </div>
+  );
+}
