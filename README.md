@@ -78,9 +78,15 @@ The **[Jenkinsfile](Jenkinsfile)** pipeline:
 
 Create a **Multibranch Pipeline** or **Pipeline** job pointing at this repo. The agent needs the **Docker CLI** (and permission to run `docker` against a daemon) for verify and image build. The pipeline does **not** use the Docker Pipeline plugin’s `agent { docker { ... } }` block. If `docker run` fails (e.g. permissions on the workspace mount), set **`SKIP_CLIENT_VERIFY=true`** and rely on the Dockerfile’s internal client build.
 
-### Optional: deploy container from Jenkins
+### Optional: deploy container from Jenkins (Option B)
 
-Set job (or folder) environment **`RUN_DEPLOY=true`** to run the **Deploy container** stage after the image is built.
+You can deploy in either way:
+
+**A — Per build (recommended):** When you click **Build with Parameters**, enable **`Run deploy after build`**, then start the build.
+
+**B — Every build:** Set job or folder environment **`RUN_DEPLOY=true`** (no checkbox needed).
+
+Then:
 
 1. In Jenkins: **Manage Credentials** → add two **Secret text** entries (IDs must match unless you override):
    - **`media-streaming-jwt-secret`** — value at least **16** characters (`JWT_SECRET`).

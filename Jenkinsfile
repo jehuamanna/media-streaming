@@ -16,7 +16,7 @@
       SKIP_DOCKER_PUSH   = true   # never push, even on main/master
 
   Optional container deploy (after build):
-      RUN_DEPLOY = true           # run "Deploy container" stage
+      Tick "Run deploy after build" when starting a build, OR set job env RUN_DEPLOY=true (always deploy)
   Create two "Secret text" credentials in Jenkins:
       Default IDs: media-streaming-jwt-secret  -> JWT (min 16 chars)
                     media-streaming-admin-initial-password -> bootstrap admin pwd (min 8 chars; ignored if DB already has admin)
@@ -34,6 +34,14 @@
 
 pipeline {
   agent any
+
+  parameters {
+    booleanParam(
+      name: 'RUN_DEPLOY_PARAM',
+      defaultValue: false,
+      description: 'Run Deploy container stage (docker run) after image build. Requires Secret text credentials media-streaming-jwt-secret and media-streaming-admin-initial-password.',
+    )
+  }
 
   options {
     buildDiscarder(logRotator(numToKeepStr: '20'))
@@ -141,7 +149,9 @@ pipeline {
 
     stage('Deploy container') {
       when {
-        expression { env.RUN_DEPLOY == 'true' }
+        expression {
+          return env.RUN_DEPLOY == 'true' || params.RUN_DEPLOY_PARAM == true
+        }
       }
       steps {
         script {
@@ -182,7 +192,7 @@ pipeline {
     success {
       echo "Built image: ${env.LOCAL_IMAGE} (also ${env.IMAGE_NAME}:latest)"
       echo 'NOTE: Docker images exist on the Jenkins AGENT that ran this job (same host as "docker build"), not on your PC.'
-      echo 'If Deploy was skipped: set job env RUN_DEPLOY=true and add Jenkins Secret text credentials (see Jenkinsfile header).'
+      echo 'If Deploy was skipped: tick "Run deploy after build" when building, or set env RUN_DEPLOY=true; add Secret text credentials (see Jenkinsfile header).'
       echo 'If Push was skipped: set DOCKER_REGISTRY and use branch main/master (or GIT_BRANCH origin/main).'
       sh script: "docker images '${env.IMAGE_NAME}' 2>/dev/null | head -25 || true", returnStatus: true
     }
