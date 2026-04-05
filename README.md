@@ -77,3 +77,15 @@ The **[Jenkinsfile](Jenkinsfile)** pipeline:
 4. **Docker push** (optional) — only if `DOCKER_REGISTRY` is set (e.g. `ghcr.io/myorg`) **and** the branch is `main` or `master`. Requires username/password credentials whose ID defaults to `docker-registry` (override with `DOCKER_REGISTRY_CREDS_ID`). For `docker login`, the host is `DOCKER_LOGIN_HOST` if set, otherwise the first segment of `DOCKER_REGISTRY` (e.g. `ghcr.io`). Set `SKIP_DOCKER_PUSH=true` to disable pushing.
 
 Create a **Multibranch Pipeline** or **Pipeline** job pointing at this repo. The agent needs the **Docker CLI** (and permission to run `docker` against a daemon) for verify and image build. The pipeline does **not** use the Docker Pipeline plugin’s `agent { docker { ... } }` block. If `docker run` fails (e.g. permissions on the workspace mount), set **`SKIP_CLIENT_VERIFY=true`** and rely on the Dockerfile’s internal client build.
+
+### Optional: deploy container from Jenkins
+
+Set job (or folder) environment **`RUN_DEPLOY=true`** to run the **Deploy container** stage after the image is built.
+
+1. In Jenkins: **Manage Credentials** → add two **Secret text** entries (IDs must match unless you override):
+   - **`media-streaming-jwt-secret`** — value at least **16** characters (`JWT_SECRET`).
+   - **`media-streaming-admin-initial-password`** — at least **8** characters; only used when the **`/data`** volume has **no** admin user yet (otherwise the app ignores it).
+
+2. Optional job env overrides: **`JWT_SECRET_CRED_ID`**, **`ADMIN_INITIAL_PASSWORD_CRED_ID`**, **`DEPLOY_CONTAINER_NAME`**, **`DEPLOY_VIDEOS_PATH`** (host path for library, default `${WORKSPACE}/Videos`), **`DEPLOY_DATA_VOLUME`** (default `media-streaming-data`), **`DEPLOY_HOST_PORT_HTTP`**, **`DEPLOY_HOST_PORT_RTMP`**, **`DEPLOY_SKIP_RM=true`** to avoid removing an existing container first.
+
+The stage runs **`docker run -d`** with **`${IMAGE_NAME}:latest`** (the tag produced by this pipeline).
