@@ -796,6 +796,62 @@ function requireAdmin(req, res, next) {
   next();
 }
 
+let transcodeAllJob = null;
+
+app.get('/api/admin/transcode-all/status', authMiddleware(true), requireAdmin, (req, res) => {
+  if (!transcodeAllJob) {
+    return res.json({ running: false });
+  }
+  res.json({
+    running: true,
+    total: transcodeAllJob.total,
+    done: transcodeAllJob.done,
+    currentFileId: transcodeAllJob.currentFileId,
+    startedAt: transcodeAllJob.startedAt,
+  });
+});
+
+app.post('/api/admin/transcode-all', authMiddleware(true), requireAdmin, (req, res) => {
+  if (transcodeAllJob) {
+    return res.status(409).json({
+      error: 'transcode_all_running',
+      message: 'A full-library transcode is already in progress.',
+      ...transcodeAllJob,
+    });
+  }
+  libraryCache = { at: 0, data: null, fileMap: new Map() };
+  const { fileMap } = getLibrary();
+  const fileIds = [...fileMap.keys()];
+  const startedAt = Date.now();
+  transcodeAllJob = { total: fileIds.length, done: 0, currentFileId: null, startedAt };
+  res.json({
+    ok: true,
+    queued: fileIds.length,
+    message:
+      'Transcoding started in the background. Already-cached files are skipped quickly. Watch server logs for progress.',
+  });
+
+  void (async () => {
+    try {
+      for (let i = 0; i < fileIds.length; i++) {
+        const fileId = fileIds[i];
+        transcodeAllJob.currentFileId = fileId;
+        try {
+          await ensureVodHls(fileId);
+          transcodeAllJob.done = i + 1;
+          console.log(`[transcode-all] ${i + 1}/${fileIds.length} ok ${fileId}`);
+        } catch (e) {
+          transcodeAllJob.done = i + 1;
+          console.error(`[transcode-all] ${i + 1}/${fileIds.length} fail ${fileId}`, e?.message || e);
+        }
+      }
+      console.log('[transcode-all] batch finished');
+    } finally {
+      transcodeAllJob = null;
+    }
+  })();
+});
+
 app.get('/api/admin/users', authMiddleware(true), requireAdmin, (req, res) => {
   const rows = db
     .prepare(`SELECT id, username, role, must_change_password, created_at FROM users ORDER BY id`)
