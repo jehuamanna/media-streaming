@@ -200,6 +200,83 @@ function releaseVodTranscodeSlot() {
 }
 
 const VOD_PLAYABLE_WAIT_MS = Number.parseInt(String(process.env.VOD_PLAYABLE_WAIT_MS || ''), 10) || 1_800_000;
+const VOD_ENCODING_LOCK_STALE_MS =
+  Number.parseInt(String(process.env.VOD_ENCODING_LOCK_STALE_MS || ''), 10) || 4 * 60 * 60 * 1000;
+
+const vodEncodingLockDir = path.join(HLS_VOD_DIR, '.locks');
+
+function vodEncodingLockPath(fileId) {
+  return path.join(vodEncodingLockDir, `${fileId}.lock`);
+}
+
+function vodIndexFresh(indexPath, srcMtime) {
+  try {
+    const st = fs.statSync(indexPath);
+    return st.mtimeMs >= srcMtime;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Cross-process mutex: in-memory vodLocks do not span multiple Node workers/containers.
+ * Without this, each process spawns ffmpeg for the same file and rmSync fights others.
+ */
+function tryAcquireEncodingLock(fileId, depth = 0) {
+  if (depth > 8) return null;
+  fs.mkdirSync(vodEncodingLockDir, { recursive: true });
+  const p = vodEncodingLockPath(fileId);
+  try {
+    const fd = fs.openSync(p, 'wx');
+    try {
+      fs.writeSync(fd, `${process.pid}\n${Date.now()}`);
+    } finally {
+      fs.closeSync(fd);
+    }
+    return () => {
+      try {
+        fs.unlinkSync(p);
+      } catch {
+        /* ignore */
+      }
+    };
+  } catch (e) {
+    if (e?.code !== 'EEXIST') throw e;
+    let st;
+    try {
+      st = fs.statSync(p);
+    } catch {
+      return tryAcquireEncodingLock(fileId, depth + 1);
+    }
+    if (Date.now() - st.mtimeMs > VOD_ENCODING_LOCK_STALE_MS) {
+      try {
+        fs.unlinkSync(p);
+      } catch {
+        /* ignore */
+      }
+      return tryAcquireEncodingLock(fileId, depth + 1);
+    }
+    return null;
+  }
+}
+
+async function waitForVodFromPeer(fileId, outDir, indexPath, srcMtime) {
+  const deadline = Date.now() + VOD_PLAYABLE_WAIT_MS;
+  const lockP = vodEncodingLockPath(fileId);
+  while (Date.now() < deadline) {
+    if (vodIndexFresh(indexPath, srcMtime)) {
+      return outDir;
+    }
+    if (!fs.existsSync(lockP)) {
+      await new Promise((r) => setTimeout(r, 100));
+      return ensureVodHls(fileId);
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  const err = new Error('Timed out waiting for VOD transcode');
+  err.code = 'TIMEOUT';
+  throw err;
+}
 
 function ffmpegVodArgs(meta, outDir) {
   const indexM3u8 = path.join(outDir, 'index.m3u8');
@@ -332,17 +409,15 @@ function ensureVodHls(fileId) {
     err.code = 'NOT_FOUND';
     return Promise.reject(err);
   }
-  let cacheOk = false;
-  try {
-    const st = fs.statSync(indexPath);
-    if (st.mtimeMs >= srcMtime) cacheOk = true;
-  } catch {
-    cacheOk = false;
-  }
-  if (cacheOk) return Promise.resolve(outDir);
+  if (vodIndexFresh(indexPath, srcMtime)) return Promise.resolve(outDir);
 
   const existing = vodLocks.get(fileId);
   if (existing) return existing;
+
+  const releaseEncodingLock = tryAcquireEncodingLock(fileId);
+  if (!releaseEncodingLock) {
+    return waitForVodFromPeer(fileId, outDir, indexPath, srcMtime);
+  }
 
   let resolveHttp;
   let rejectHttp;
@@ -397,6 +472,11 @@ function ensureVodHls(fileId) {
         }
       }
     } finally {
+      try {
+        releaseEncodingLock();
+      } catch {
+        /* ignore */
+      }
       releaseVodTranscodeSlot();
       vodLocks.delete(fileId);
     }
