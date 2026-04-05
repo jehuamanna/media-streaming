@@ -13,6 +13,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 8020);
 const VIDEOS_DIR = process.env.VIDEOS_DIR || '/streaming/Videos';
 const HLS_VOD_DIR = process.env.HLS_VOD_DIR || '/var/hls/vod';
+const VOD_FFMPEG_CONCURRENCY = Math.max(
+  1,
+  Number.parseInt(String(process.env.VOD_FFMPEG_CONCURRENCY || '2'), 10) || 2,
+);
 const DATABASE_PATH = process.env.DATABASE_PATH || path.join(__dirname, 'data', 'app.db');
 const JWT_SECRET = process.env.JWT_SECRET;
 const ADMIN_INITIAL_PASSWORD = process.env.ADMIN_INITIAL_PASSWORD || '';
@@ -173,40 +177,30 @@ function getFileMeta(fileId) {
 
 const vodLocks = new Map();
 
-function ensureVodHls(fileId) {
-  const meta = getFileMeta(fileId);
-  if (!meta) {
-    const err = new Error('NOT_FOUND');
-    err.code = 'NOT_FOUND';
-    return Promise.reject(err);
-  }
-  const outDir = path.join(HLS_VOD_DIR, fileId);
-  const indexPath = path.join(outDir, 'index.m3u8');
-  let srcMtime = 0;
-  try {
-    srcMtime = fs.statSync(meta.absPath).mtimeMs;
-  } catch {
-    const err = new Error('NOT_FOUND');
-    err.code = 'NOT_FOUND';
-    return Promise.reject(err);
-  }
-  let cacheOk = false;
-  try {
-    const st = fs.statSync(indexPath);
-    if (st.mtimeMs >= srcMtime) cacheOk = true;
-  } catch {
-    cacheOk = false;
-  }
-  if (cacheOk) return Promise.resolve(outDir);
+let vodTranscodeActive = 0;
+const vodTranscodeWaitQueue = [];
 
-  const existing = vodLocks.get(fileId);
-  if (existing) return existing;
+function acquireVodTranscodeSlot() {
+  if (vodTranscodeActive < VOD_FFMPEG_CONCURRENCY) {
+    vodTranscodeActive++;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    vodTranscodeWaitQueue.push(resolve);
+  });
+}
 
-  const p = new Promise((resolve, reject) => {
-    fs.mkdirSync(outDir, { recursive: true });
-    const tmpDir = path.join(outDir, '.tmp');
-    fs.mkdirSync(tmpDir, { recursive: true });
-    const tmpM3u8 = path.join(tmpDir, 'index.m3u8');
+function releaseVodTranscodeSlot() {
+  vodTranscodeActive--;
+  const next = vodTranscodeWaitQueue.shift();
+  if (next) {
+    vodTranscodeActive++;
+    next();
+  }
+}
+
+function runFfmpegVodTranscode(meta, outDir, tmpDir, tmpM3u8) {
+  return new Promise((resolve, reject) => {
     const args = [
       '-y',
       '-i',
@@ -238,7 +232,6 @@ function ensureVodHls(fileId) {
     });
     ff.on('error', (e) => reject(e));
     ff.on('close', (code) => {
-      vodLocks.delete(fileId);
       if (code !== 0) {
         try {
           fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -262,7 +255,54 @@ function ensureVodHls(fileId) {
       resolve(outDir);
     });
   });
+}
+
+function ensureVodHls(fileId) {
+  const meta = getFileMeta(fileId);
+  if (!meta) {
+    const err = new Error('NOT_FOUND');
+    err.code = 'NOT_FOUND';
+    return Promise.reject(err);
+  }
+  const outDir = path.join(HLS_VOD_DIR, fileId);
+  const indexPath = path.join(outDir, 'index.m3u8');
+  let srcMtime = 0;
+  try {
+    srcMtime = fs.statSync(meta.absPath).mtimeMs;
+  } catch {
+    const err = new Error('NOT_FOUND');
+    err.code = 'NOT_FOUND';
+    return Promise.reject(err);
+  }
+  let cacheOk = false;
+  try {
+    const st = fs.statSync(indexPath);
+    if (st.mtimeMs >= srcMtime) cacheOk = true;
+  } catch {
+    cacheOk = false;
+  }
+  if (cacheOk) return Promise.resolve(outDir);
+
+  const existing = vodLocks.get(fileId);
+  if (existing) return existing;
+
+  const p = (async () => {
+    await acquireVodTranscodeSlot();
+    try {
+      fs.mkdirSync(outDir, { recursive: true });
+      const tmpDir = path.join(outDir, '.tmp');
+      fs.mkdirSync(tmpDir, { recursive: true });
+      const tmpM3u8 = path.join(tmpDir, 'index.m3u8');
+      return await runFfmpegVodTranscode(meta, outDir, tmpDir, tmpM3u8);
+    } finally {
+      releaseVodTranscodeSlot();
+    }
+  })();
+
   vodLocks.set(fileId, p);
+  p.finally(() => {
+    vodLocks.delete(fileId);
+  });
   return p;
 }
 

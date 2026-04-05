@@ -11,29 +11,33 @@ type Props = {
 
 type VideoJsPlayer = ReturnType<typeof videojs>;
 
-function attachVhsAuth(player: VideoJsPlayer) {
-  const token = getToken();
-  if (!token) return;
-  const hook = (options: unknown) => {
-    const o = options as { headers?: Record<string, string> };
-    o.headers = o.headers || {};
-    o.headers.Authorization = `Bearer ${token}`;
-    return o;
-  };
-  try {
-    const tech = player.tech({ IWillNotUseThisInPlugins: true }) as unknown as {
-      vhs?: { xhr?: { beforeRequest?: (o: unknown) => unknown } };
-    };
-    if (tech?.vhs?.xhr) {
-      tech.vhs.xhr.beforeRequest = hook;
+let vhsOnRequestInstalled = false;
+
+/**
+ * VHS uses xhr with a 45s default timeout. The server blocks on index.m3u8 until
+ * ffmpeg finishes the full VOD transcode, which can exceed that. The deprecated
+ * beforeRequest hook is also removed from the hook set after each XHR; use onRequest.
+ */
+function ensureVhsAuthAndTimeouts() {
+  if (vhsOnRequestInstalled) return;
+  const Vhs = (videojs as unknown as { Vhs?: { xhr?: { onRequest?: (fn: (o: unknown) => unknown) => void } } })
+    .Vhs;
+  const onRequest = Vhs?.xhr?.onRequest;
+  if (!onRequest) return;
+  onRequest((options: unknown) => {
+    const o = options as { uri?: string; headers?: Record<string, string>; timeout?: number };
+    const token = getToken();
+    if (token) {
+      o.headers = { ...o.headers };
+      o.headers.Authorization = `Bearer ${token}`;
     }
-  } catch {
-    /* ignore */
-  }
-  const Vhs = (videojs as unknown as { Vhs?: { xhr?: { beforeRequest?: (o: unknown) => unknown } } }).Vhs;
-  if (Vhs?.xhr) {
-    Vhs.xhr.beforeRequest = hook;
-  }
+    const uri = o.uri;
+    if (typeof uri === 'string' && (uri.includes('/hls/vod/') || uri.includes('/hls/live/'))) {
+      o.timeout = 0;
+    }
+    return o;
+  });
+  vhsOnRequestInstalled = true;
 }
 
 export function VideoPlayer({ src, fileId, onEnded }: Props) {
@@ -44,6 +48,7 @@ export function VideoPlayer({ src, fileId, onEnded }: Props) {
 
   useEffect(() => {
     if (!videoRef.current) return;
+    ensureVhsAuthAndTimeouts();
     const container = videoRef.current;
     const el = document.createElement('video-js');
     el.classList.add('vjs-big-play-centered');
@@ -56,7 +61,6 @@ export function VideoPlayer({ src, fileId, onEnded }: Props) {
       html5: { vhs: { overrideNative: true } },
     });
     playerRef.current = player;
-    player.ready(() => attachVhsAuth(player));
     player.on('ended', () => onEndedRef.current?.());
 
     return () => {
@@ -77,7 +81,7 @@ export function VideoPlayer({ src, fileId, onEnded }: Props) {
       }
       return;
     }
-    attachVhsAuth(player);
+    ensureVhsAuthAndTimeouts();
     player.src({ src, type: 'application/x-mpegURL' });
     let cancelled = false;
 
