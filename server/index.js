@@ -218,6 +218,40 @@ function vodIndexFresh(indexPath, srcMtime) {
   }
 }
 
+/** True when manifest is up to date and at least one listed segment exists on disk (same bar as waitForPlayableHls). */
+function isVodHlsPlayable(fileId) {
+  const meta = getFileMeta(fileId);
+  if (!meta) return false;
+  let srcMtime = 0;
+  try {
+    srcMtime = fs.statSync(meta.absPath).mtimeMs;
+  } catch {
+    return false;
+  }
+  const indexPath = path.join(HLS_VOD_DIR, fileId, 'index.m3u8');
+  if (!vodIndexFresh(indexPath, srcMtime)) return false;
+  try {
+    const txt = fs.readFileSync(indexPath, 'utf8');
+    if (!txt.includes('#EXTINF')) return false;
+    const lines = txt.split(/\r?\n/);
+    const outDir = path.dirname(indexPath);
+    for (const line of lines) {
+      const t = line.trim();
+      if (t && !t.startsWith('#')) {
+        const segPath = path.join(outDir, t);
+        try {
+          if (fs.existsSync(segPath) && fs.statSync(segPath).size > 0) return true;
+        } catch {
+          /* keep scanning */
+        }
+      }
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
 /**
  * Cross-process mutex: in-memory vodLocks do not span multiple Node workers/containers.
  * Without this, each process spawns ffmpeg for the same file and rmSync fights others.
@@ -810,6 +844,23 @@ app.delete('/api/admin/users/:id', authMiddleware(true), requireAdmin, (req, res
   res.status(204).end();
 });
 
+app.get('/api/vod/playable/:fileId', authMiddleware(true), (req, res) => {
+  const fileId = String(req.params.fileId || '');
+  if (!/^[0-9a-f]{32}$/.test(fileId)) {
+    return res.status(400).json({ error: 'Invalid fileId' });
+  }
+  if (!getFileMeta(fileId)) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  if (isVodHlsPlayable(fileId)) {
+    return res.json({ playable: true });
+  }
+  void ensureVodHls(fileId).catch((e) => {
+    if (e?.code !== 'NOT_FOUND') console.error('[vod]', e);
+  });
+  res.json({ playable: false });
+});
+
 async function vodEnsureHandler(req, res, next) {
   const m = req.path.match(/^\/([0-9a-f]{32})\/(index\.m3u8|segment\d+\.ts)$/);
   if (!m) {
@@ -817,6 +868,19 @@ async function vodEnsureHandler(req, res, next) {
   }
   const fileId = m[1];
   try {
+    if (m[2] === 'index.m3u8') {
+      if (!getFileMeta(fileId)) {
+        return res.status(404).end();
+      }
+      if (!isVodHlsPlayable(fileId)) {
+        void ensureVodHls(fileId).catch((e) => {
+          if (e?.code !== 'NOT_FOUND') console.error('[vod]', e);
+        });
+        res.setHeader('Retry-After', '2');
+        return res.status(503).json({ error: 'not_ready', message: 'Transcoding in progress.' });
+      }
+      return next();
+    }
     await ensureVodHls(fileId);
     next();
   } catch (e) {

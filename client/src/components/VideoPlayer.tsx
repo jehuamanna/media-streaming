@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import videojs from 'video.js';
 import 'video.js/dist/video-js.css';
 import { api, getToken } from '../api';
@@ -40,11 +40,16 @@ function ensureVhsAuthAndTimeouts() {
   vhsOnRequestInstalled = true;
 }
 
+function isVodHlsSrc(s: string) {
+  return s.includes('/hls/vod/');
+}
+
 export function VideoPlayer({ src, fileId, onEnded }: Props) {
   const videoRef = useRef<HTMLDivElement>(null);
   const playerRef = useRef<VideoJsPlayer | null>(null);
   const onEndedRef = useRef(onEnded);
   onEndedRef.current = onEnded;
+  const [vodPreparing, setVodPreparing] = useState(false);
 
   useEffect(() => {
     if (!videoRef.current) return;
@@ -73,6 +78,7 @@ export function VideoPlayer({ src, fileId, onEnded }: Props) {
     const player = playerRef.current;
     if (!player) return;
     if (!src) {
+      setVodPreparing(false);
       try {
         player.pause();
         player.reset();
@@ -82,10 +88,41 @@ export function VideoPlayer({ src, fileId, onEnded }: Props) {
       return;
     }
     ensureVhsAuthAndTimeouts();
-    player.src({ src, type: 'application/x-mpegURL' });
     let cancelled = false;
+    const waitVodThenPlay = async () => {
+      if (fileId && isVodHlsSrc(src)) {
+        setVodPreparing(true);
+        try {
+          player.pause();
+          player.reset();
+        } catch {
+          /* ignore */
+        }
+        try {
+          for (;;) {
+            if (cancelled) return;
+            const r = await api<{ playable: boolean }>(
+              `/api/vod/playable/${encodeURIComponent(fileId)}`,
+            );
+            if (r.playable) break;
+            await new Promise((r) => setTimeout(r, 1500));
+          }
+        } catch {
+          if (!cancelled) setVodPreparing(false);
+          try {
+            player.pause();
+            player.reset();
+          } catch {
+            /* ignore */
+          }
+          return;
+        }
+        if (cancelled) return;
+        setVodPreparing(false);
+      }
+      ensureVhsAuthAndTimeouts();
+      player.src({ src, type: 'application/x-mpegURL' });
 
-    (async () => {
       if (!fileId) return;
       try {
         const r = await api<{
@@ -106,10 +143,12 @@ export function VideoPlayer({ src, fileId, onEnded }: Props) {
       } catch {
         /* ignore */
       }
-    })();
+    };
+    void waitVodThenPlay();
 
     return () => {
       cancelled = true;
+      setVodPreparing(false);
     };
   }, [src, fileId]);
 
@@ -151,6 +190,10 @@ export function VideoPlayer({ src, fileId, onEnded }: Props) {
       {!src ? (
         <div className="player-placeholder">
           <span>Select a video</span>
+        </div>
+      ) : vodPreparing ? (
+        <div className="player-placeholder">
+          <span>Preparing playback (first play transcodes to HLS)…</span>
         </div>
       ) : null}
     </div>
