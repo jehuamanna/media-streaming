@@ -199,60 +199,118 @@ function releaseVodTranscodeSlot() {
   }
 }
 
-function runFfmpegVodTranscode(meta, outDir, tmpDir, tmpM3u8) {
+const VOD_PLAYABLE_WAIT_MS = Number.parseInt(String(process.env.VOD_PLAYABLE_WAIT_MS || ''), 10) || 1_800_000;
+
+function ffmpegVodArgs(meta, outDir) {
+  const indexM3u8 = path.join(outDir, 'index.m3u8');
+  return [
+    '-y',
+    '-i',
+    meta.absPath,
+    '-c:v',
+    'libx264',
+    '-preset',
+    'veryfast',
+    '-crf',
+    '23',
+    '-c:a',
+    'aac',
+    '-b:a',
+    '128k',
+    '-f',
+    'hls',
+    '-hls_time',
+    '6',
+    '-hls_playlist_type',
+    'vod',
+    '-hls_segment_filename',
+    path.join(outDir, 'segment%03d.ts'),
+    indexM3u8,
+  ];
+}
+
+/**
+ * Resolve when index.m3u8 lists at least one .ts that exists and is non-empty,
+ * or when ffmpeg has already exited successfully (short / fast encode).
+ */
+function waitForPlayableHls(outDir, ff, timeoutMs) {
+  const indexPath = path.join(outDir, 'index.m3u8');
+  const deadline = Date.now() + timeoutMs;
+
   return new Promise((resolve, reject) => {
-    const args = [
-      '-y',
-      '-i',
-      meta.absPath,
-      '-c:v',
-      'libx264',
-      '-preset',
-      'veryfast',
-      '-crf',
-      '23',
-      '-c:a',
-      'aac',
-      '-b:a',
-      '128k',
-      '-f',
-      'hls',
-      '-hls_time',
-      '6',
-      '-hls_playlist_type',
-      'vod',
-      '-hls_segment_filename',
-      path.join(tmpDir, 'segment%03d.ts'),
-      tmpM3u8,
-    ];
-    const ff = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
-    let stderr = '';
-    ff.stderr?.on('data', (d) => {
-      stderr += d.toString();
-    });
-    ff.on('error', (e) => reject(e));
-    ff.on('close', (code) => {
-      if (code !== 0) {
+    const iv = setInterval(() => {
+      if (ff.exitCode !== null) {
+        clearInterval(iv);
+        if (ff.exitCode === 0) {
+          try {
+            const txt = fs.readFileSync(indexPath, 'utf8');
+            if (txt.includes('#EXTINF')) {
+              resolve();
+              return;
+            }
+          } catch {
+            /* fall through */
+          }
+          reject(Object.assign(new Error('ffmpeg exited but manifest is not usable'), { code: 'FFMPEG' }));
+        } else {
+          reject(Object.assign(new Error(`ffmpeg exited ${ff.exitCode}`), { code: 'FFMPEG' }));
+        }
+        return;
+      }
+      if (Date.now() > deadline) {
+        clearInterval(iv);
         try {
-          fs.rmSync(tmpDir, { recursive: true, force: true });
+          ff.kill('SIGKILL');
         } catch {
           /* ignore */
         }
-        const err = new Error(stderr.slice(-500) || `ffmpeg exited ${code}`);
-        err.code = 'FFMPEG';
-        reject(err);
+        reject(Object.assign(new Error('Timed out waiting for first HLS segment'), { code: 'TIMEOUT' }));
         return;
       }
       try {
-        for (const name of fs.readdirSync(tmpDir)) {
-          fs.renameSync(path.join(tmpDir, name), path.join(outDir, name));
+        if (!fs.existsSync(indexPath)) return;
+        const txt = fs.readFileSync(indexPath, 'utf8');
+        if (!txt.includes('#EXTINF')) return;
+        const lines = txt.split(/\r?\n/);
+        for (const line of lines) {
+          const t = line.trim();
+          if (t && !t.startsWith('#')) {
+            const segPath = path.join(outDir, t);
+            try {
+              if (fs.existsSync(segPath) && fs.statSync(segPath).size > 0) {
+                clearInterval(iv);
+                resolve();
+                return;
+              }
+            } catch {
+              /* keep polling */
+            }
+          }
         }
-        fs.rmSync(tmpDir, { recursive: true, force: true });
-      } catch (e) {
-        reject(e);
-        return;
+      } catch {
+        /* ignore */
       }
-      resolve(outDir);
+    }, 150);
+  });
+}
+
+function waitForFfmpegClose(ff, stderr) {
+  return new Promise((resolve, reject) => {
+    if (ff.exitCode !== null) {
+      if (ff.exitCode === 0) resolve();
+      else {
+        const err = new Error((stderr || '').slice(-500) || `ffmpeg exited ${ff.exitCode}`);
+        err.code = 'FFMPEG';
+        reject(err);
+      }
+      return;
+    }
+    ff.once('close', (code) => {
+      if (code !== 0) {
+        const err = new Error((stderr || '').slice(-500) || `ffmpeg exited ${code}`);
+        err.code = 'FFMPEG';
+        reject(err);
+      } else resolve();
     });
   });
 }
@@ -286,24 +344,65 @@ function ensureVodHls(fileId) {
   const existing = vodLocks.get(fileId);
   if (existing) return existing;
 
-  const p = (async () => {
+  let resolveHttp;
+  let rejectHttp;
+  const httpPromise = new Promise((res, rej) => {
+    resolveHttp = res;
+    rejectHttp = rej;
+  });
+  let httpSettled = false;
+  const settleHttp = (err, value) => {
+    if (httpSettled) return;
+    httpSettled = true;
+    if (err) rejectHttp(err);
+    else resolveHttp(value);
+  };
+
+  vodLocks.set(fileId, httpPromise);
+
+  (async () => {
+    let stderr = '';
+    let ff = null;
     await acquireVodTranscodeSlot();
     try {
+      fs.rmSync(outDir, { recursive: true, force: true });
       fs.mkdirSync(outDir, { recursive: true });
-      const tmpDir = path.join(outDir, '.tmp');
-      fs.mkdirSync(tmpDir, { recursive: true });
-      const tmpM3u8 = path.join(tmpDir, 'index.m3u8');
-      return await runFfmpegVodTranscode(meta, outDir, tmpDir, tmpM3u8);
+      ff = spawn('ffmpeg', ffmpegVodArgs(meta, outDir), { stdio: ['ignore', 'ignore', 'pipe'] });
+      ff.stderr?.on('data', (d) => {
+        stderr += d.toString();
+      });
+
+      const spawnOrRunError = new Promise((_, rej) => {
+        ff.once('error', rej);
+      });
+      await Promise.race([waitForPlayableHls(outDir, ff, VOD_PLAYABLE_WAIT_MS), spawnOrRunError]);
+      settleHttp(null, outDir);
+
+      await waitForFfmpegClose(ff, stderr);
+    } catch (e) {
+      const clientAlreadyHasManifest = httpSettled;
+      settleHttp(e);
+      if (ff && ff.exitCode === null) {
+        try {
+          ff.kill('SIGKILL');
+        } catch {
+          /* ignore */
+        }
+      }
+      if (!clientAlreadyHasManifest) {
+        try {
+          fs.rmSync(outDir, { recursive: true, force: true });
+        } catch {
+          /* ignore */
+        }
+      }
     } finally {
       releaseVodTranscodeSlot();
+      vodLocks.delete(fileId);
     }
   })();
 
-  vodLocks.set(fileId, p);
-  p.finally(() => {
-    vodLocks.delete(fileId);
-  });
-  return p;
+  return httpPromise;
 }
 
 function initDb() {
