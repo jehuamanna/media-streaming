@@ -16,7 +16,8 @@
       SKIP_DOCKER_PUSH   = true   # never push, even on main/master
 
   Optional container deploy (after build):
-      Tick "Run deploy after build" when starting a build, OR set job env RUN_DEPLOY=true (always deploy)
+      Deploy runs by default (boolean param default true). Uncheck "Skip deploy" to only build the image,
+  OR set job env RUN_DEPLOY=false. Set RUN_DEPLOY=true to force deploy even if param unchecked.
   Create two "Secret text" credentials in Jenkins:
       Default IDs: media-streaming-jwt-secret  -> JWT (min 16 chars)
                     media-streaming-admin-initial-password -> bootstrap admin pwd (min 8 chars; ignored if DB already has admin)
@@ -38,8 +39,8 @@ pipeline {
   parameters {
     booleanParam(
       name: 'RUN_DEPLOY_PARAM',
-      defaultValue: false,
-      description: 'Run Deploy container stage (docker run) after image build. Requires Secret text credentials media-streaming-jwt-secret and media-streaming-admin-initial-password.',
+      defaultValue: true,
+      description: 'Run Deploy (docker run) after build. Uncheck for image-only build. Requires Jenkins Secret text: media-streaming-jwt-secret + media-streaming-admin-initial-password.',
     )
   }
 
@@ -78,6 +79,14 @@ pipeline {
           def commitShort = env.GIT_COMMIT ? env.GIT_COMMIT.take(7) : 'nogit'
           env.TAG = "${br}-${env.BUILD_NUMBER}-${commitShort}"
           env.LOCAL_IMAGE = "${env.IMAGE_NAME}:${env.TAG}"
+          def pVal = true
+          try {
+            pVal = params.RUN_DEPLOY_PARAM
+          } catch (MissingPropertyException ignored) {
+            pVal = true
+          }
+          def willDeploy = env.RUN_DEPLOY == 'true' || (env.RUN_DEPLOY != 'false' && pVal != false)
+          echo "Deploy container stage will run: ${willDeploy} (RUN_DEPLOY='${env.RUN_DEPLOY}', RUN_DEPLOY_PARAM=${pVal})"
         }
       }
     }
@@ -150,7 +159,17 @@ pipeline {
     stage('Deploy container') {
       when {
         expression {
-          return env.RUN_DEPLOY == 'true' || params.RUN_DEPLOY_PARAM == true
+          if (env.RUN_DEPLOY == 'false') {
+            return false
+          }
+          if (env.RUN_DEPLOY == 'true') {
+            return true
+          }
+          try {
+            return params.RUN_DEPLOY_PARAM != false
+          } catch (MissingPropertyException e) {
+            return true
+          }
         }
       }
       steps {
@@ -192,7 +211,7 @@ pipeline {
     success {
       echo "Built image: ${env.LOCAL_IMAGE} (also ${env.IMAGE_NAME}:latest)"
       echo 'NOTE: Docker images exist on the Jenkins AGENT that ran this job (same host as "docker build"), not on your PC.'
-      echo 'If Deploy was skipped: tick "Run deploy after build" when building, or set env RUN_DEPLOY=true; add Secret text credentials (see Jenkinsfile header).'
+      echo 'If Deploy was skipped: set RUN_DEPLOY=false only when you want image-only; otherwise ensure credentials exist. Uncheck deploy param to skip.'
       echo 'If Push was skipped: set DOCKER_REGISTRY and use branch main/master (or GIT_BRANCH origin/main).'
       sh script: "docker images '${env.IMAGE_NAME}' 2>/dev/null | head -25 || true", returnStatus: true
     }

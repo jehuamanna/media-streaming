@@ -80,11 +80,10 @@ Create a **Multibranch Pipeline** or **Pipeline** job pointing at this repo. The
 
 ### Optional: deploy container from Jenkins (Option B)
 
-You can deploy in either way:
+The pipeline **runs Deploy by default** (`RUN_DEPLOY_PARAM` defaults to **checked**). You should see in the log: `Deploy container stage will run: true`.
 
-**A — Per build (recommended):** When you click **Build with Parameters**, enable **`Run deploy after build`**, then start the build.
-
-**B — Every build:** Set job or folder environment **`RUN_DEPLOY=true`** (no checkbox needed).
+- **Image only (no container):** use **Build with Parameters** and **uncheck** the deploy checkbox, **or** set job env **`RUN_DEPLOY=false`**.
+- **Force deploy** even if the box is unchecked: set **`RUN_DEPLOY=true`** on the job.
 
 Then:
 
