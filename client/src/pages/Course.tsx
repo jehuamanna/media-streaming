@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../api';
 import { VideoPlayer } from '../components/VideoPlayer';
@@ -80,6 +80,19 @@ export default function Course() {
     setQueueIndex(idx >= 0 ? idx : 0);
   }, []);
 
+  const defaultedFirstRef = useRef(false);
+  useEffect(() => {
+    defaultedFirstRef.current = false;
+  }, [rootId]);
+
+  useEffect(() => {
+    if (!root || playFileId) return;
+    if (flatItems.length === 0) return;
+    if (defaultedFirstRef.current) return;
+    defaultedFirstRef.current = true;
+    playItem(flatItems[0], flatItems);
+  }, [root, playFileId, flatItems, playItem]);
+
   useEffect(() => {
     if (!root || !playFileId) return;
     const all: Item[] = [];
@@ -91,6 +104,7 @@ export default function Course() {
   }, [root, playFileId, playItem]);
 
   const current = queue[queueIndex] || null;
+  const nextInQueue = queue[queueIndex + 1] ?? null;
 
   const onEnded = useCallback(() => {
     setQueueIndex((i) => (i + 1 < queue.length ? i + 1 : i));
@@ -142,6 +156,8 @@ export default function Course() {
           <VideoPlayer
             src={current ? current.hlsUrl : null}
             fileId={current?.id ?? null}
+            nextSrc={nextInQueue?.hlsUrl ?? null}
+            nextFileId={nextInQueue?.id ?? null}
             onEnded={onEnded}
           />
           {current ? (

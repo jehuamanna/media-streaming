@@ -3,9 +3,15 @@ import videojs from 'video.js';
 import 'video.js/dist/video-js.css';
 import { api, getToken } from '../api';
 
+/** Keep in sync with server `ffmpegVodArgs` `-hls_time` (seconds per segment). */
+const VOD_HLS_SEGMENT_TARGET_SEC = 6;
+
 type Props = {
   src: string | null;
   fileId: string | null;
+  /** When set (e.g. course queue), prefetched when the current item is within 10s of ending. */
+  nextSrc?: string | null;
+  nextFileId?: string | null;
   onEnded?: () => void;
 };
 
@@ -44,7 +50,46 @@ function isVodHlsSrc(s: string) {
   return s.includes('/hls/vod/');
 }
 
-export function VideoPlayer({ src, fileId, onEnded }: Props) {
+/** Warm HTTP cache: manifest + enough `.ts` segments to cover ~`secondsWanted` of media. */
+async function prefetchVodSegments(hlsUrl: string, fileId: string, secondsWanted: number) {
+  try {
+    for (let i = 0; i < 24; i++) {
+      const r = await api<{ playable: boolean }>(`/api/vod/playable/${encodeURIComponent(fileId)}`);
+      if (r.playable) break;
+      await new Promise((res) => setTimeout(res, 500));
+    }
+  } catch {
+    return;
+  }
+  const token = getToken();
+  const headers: Record<string, string> = {};
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const manifestHref = new URL(hlsUrl, window.location.origin).href;
+  let text: string;
+  try {
+    const res = await fetch(manifestHref, { headers });
+    if (!res.ok) return;
+    text = await res.text();
+  } catch {
+    return;
+  }
+  const segmentUrls: string[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    const s = line.trim();
+    if (!s || s.startsWith('#')) continue;
+    segmentUrls.push(new URL(s, manifestHref).href);
+  }
+  const segCount = Math.max(1, Math.ceil(secondsWanted / VOD_HLS_SEGMENT_TARGET_SEC) + 1);
+  for (let i = 0; i < Math.min(segCount, segmentUrls.length); i++) {
+    try {
+      await fetch(segmentUrls[i], { headers });
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+export function VideoPlayer({ src, fileId, nextSrc, nextFileId, onEnded }: Props) {
   const videoRef = useRef<HTMLDivElement>(null);
   const playerRef = useRef<VideoJsPlayer | null>(null);
   const onEndedRef = useRef(onEnded);
@@ -63,7 +108,13 @@ export function VideoPlayer({ src, fileId, onEnded }: Props) {
       responsive: true,
       fluid: false,
       fill: true,
-      html5: { vhs: { overrideNative: true } },
+      html5: {
+        vhs: {
+          overrideNative: true,
+          goalBufferLength: 10,
+          maxBufferLength: 20,
+        },
+      },
     });
     playerRef.current = player;
     player.on('ended', () => onEndedRef.current?.());
@@ -122,6 +173,9 @@ export function VideoPlayer({ src, fileId, onEnded }: Props) {
       }
       ensureVhsAuthAndTimeouts();
       player.src({ src, type: 'application/x-mpegURL' });
+      if (fileId && isVodHlsSrc(src)) {
+        void prefetchVodSegments(src, fileId, 10);
+      }
 
       if (!fileId) return;
       try {
@@ -183,6 +237,28 @@ export function VideoPlayer({ src, fileId, onEnded }: Props) {
       player.off('ended', onEnded);
     };
   }, [fileId]);
+
+  useEffect(() => {
+    const player = playerRef.current;
+    if (!player || !src || !nextSrc || !nextFileId) return;
+    if (!isVodHlsSrc(nextSrc)) return;
+    let cancelled = false;
+    let fired = false;
+    const onTime = () => {
+      if (cancelled || fired) return;
+      const d = player.duration() ?? NaN;
+      const t = player.currentTime() ?? NaN;
+      if (!Number.isFinite(d) || d <= 0 || !Number.isFinite(t)) return;
+      if (d - t > 10) return;
+      fired = true;
+      void prefetchVodSegments(nextSrc, nextFileId, 10);
+    };
+    player.on('timeupdate', onTime);
+    return () => {
+      cancelled = true;
+      player.off('timeupdate', onTime);
+    };
+  }, [src, nextSrc, nextFileId]);
 
   return (
     <div className="player-wrap" data-vjs-player>

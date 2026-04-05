@@ -97,7 +97,9 @@ function buildLibrary() {
           title,
         });
       });
-      items.sort((a, b) => a.title.localeCompare(b.title));
+      items.sort((a, b) =>
+        a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: 'base' }),
+      );
       playlists.push({
         id: pl.name,
         name: pl.name,
@@ -136,7 +138,9 @@ function buildLibrary() {
         title,
       });
     }
-    rootItems.sort((a, b) => a.title.localeCompare(b.title));
+    rootItems.sort((a, b) =>
+      a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: 'base' }),
+    );
     if (rootItems.length > 0) {
       playlists.push({
         id: '__root__',
