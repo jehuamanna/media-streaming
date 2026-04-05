@@ -44,9 +44,6 @@ pipeline {
   environment {
     DOCKER_BUILDKIT = '1'
     IMAGE_NAME = "${env.IMAGE_NAME ?: 'media-streaming'}"
-    GIT_SHORT = "${env.GIT_COMMIT ? env.GIT_COMMIT.take(7) : 'nogit'}"
-    TAG = "${env.BRANCH_NAME ?: 'unknown'}-${env.BUILD_NUMBER}-${GIT_SHORT}"
-    LOCAL_IMAGE = "${IMAGE_NAME}:${TAG}"
     REGISTRY_CREDS = "${env.DOCKER_REGISTRY_CREDS_ID ?: 'docker-registry'}"
   }
 
@@ -54,6 +51,26 @@ pipeline {
     stage('Checkout') {
       steps {
         checkout scm
+      }
+    }
+
+    stage('Prepare') {
+      steps {
+        script {
+          def br = env.BRANCH_NAME?.trim()
+          if (!br && env.CHANGE_BRANCH?.trim()) {
+            br = env.CHANGE_BRANCH.trim()
+          }
+          if (!br && env.GIT_BRANCH?.trim()) {
+            br = env.GIT_BRANCH.trim().replaceAll(/^origin\//, '')
+          }
+          if (!br) {
+            br = 'local'
+          }
+          def short = env.GIT_COMMIT ? env.GIT_COMMIT.take(7) : 'nogit'
+          env.TAG = "${br}-${env.BUILD_NUMBER}-${short}"
+          env.LOCAL_IMAGE = "${env.IMAGE_NAME}:${env.TAG}"
+        }
       }
     }
 
@@ -88,6 +105,10 @@ pipeline {
           anyOf {
             branch 'main'
             branch 'master'
+            expression {
+              def gb = (env.GIT_BRANCH ?: '').replaceAll(/^origin\//, '')
+              return gb == 'main' || gb == 'master'
+            }
           }
         }
       }
@@ -160,6 +181,10 @@ pipeline {
   post {
     success {
       echo "Built image: ${env.LOCAL_IMAGE} (also ${env.IMAGE_NAME}:latest)"
+      echo 'NOTE: Docker images exist on the Jenkins AGENT that ran this job (same host as "docker build"), not on your PC.'
+      echo 'If Deploy was skipped: set job env RUN_DEPLOY=true and add Jenkins Secret text credentials (see Jenkinsfile header).'
+      echo 'If Push was skipped: set DOCKER_REGISTRY and use branch main/master (or GIT_BRANCH origin/main).'
+      sh script: "docker images '${env.IMAGE_NAME}' 2>/dev/null | head -25 || true", returnStatus: true
     }
   }
 }

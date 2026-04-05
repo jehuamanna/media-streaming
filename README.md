@@ -89,3 +89,9 @@ Set job (or folder) environment **`RUN_DEPLOY=true`** to run the **Deploy contai
 2. Optional job env overrides: **`JWT_SECRET_CRED_ID`**, **`ADMIN_INITIAL_PASSWORD_CRED_ID`**, **`DEPLOY_CONTAINER_NAME`**, **`DEPLOY_VIDEOS_PATH`** (host path for library, default `${WORKSPACE}/Videos`), **`DEPLOY_DATA_VOLUME`** (default `media-streaming-data`), **`DEPLOY_HOST_PORT_HTTP`**, **`DEPLOY_HOST_PORT_RTMP`**, **`DEPLOY_SKIP_RM=true`** to avoid removing an existing container first.
 
 The stage runs **`docker run -d`** with **`${IMAGE_NAME}:latest`** (the tag produced by this pipeline).
+
+### Jenkins: “No Docker images or containers”
+
+- **Images are stored on the machine that ran the build** (the Jenkins agent: often the same server as the controller when the job uses `agent any`). Run `docker images media-streaming` **on that host** (e.g. SSH to the Jenkins server). They will **not** appear on your laptop unless you build or pull there.
+- A successful pipeline **always builds an image**; it does **not** start a container unless **`RUN_DEPLOY=true`** is set on the job and the deploy credentials exist. Without that, **`docker ps`** will show no new container.
+- **Push** runs only when **`DOCKER_REGISTRY`** is set and the branch is **main** or **master** (including `GIT_BRANCH` `origin/main` for a single Pipeline job).
