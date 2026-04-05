@@ -44,13 +44,15 @@ export function VideoPlayer({ src, fileId, onEnded }: Props) {
 
   useEffect(() => {
     if (!videoRef.current) return;
+    const container = videoRef.current;
     const el = document.createElement('video-js');
     el.classList.add('vjs-big-play-centered');
-    videoRef.current.appendChild(el);
+    container.appendChild(el);
     const player = videojs(el, {
       controls: true,
       responsive: true,
-      fluid: true,
+      fluid: false,
+      fill: true,
       html5: { vhs: { overrideNative: true } },
     });
     playerRef.current = player;
@@ -65,7 +67,16 @@ export function VideoPlayer({ src, fileId, onEnded }: Props) {
 
   useEffect(() => {
     const player = playerRef.current;
-    if (!player || !src) return;
+    if (!player) return;
+    if (!src) {
+      try {
+        player.pause();
+        player.reset();
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
     attachVhsAuth(player);
     player.src({ src, type: 'application/x-mpegURL' });
     let cancelled = false;
@@ -130,17 +141,14 @@ export function VideoPlayer({ src, fileId, onEnded }: Props) {
     };
   }, [fileId]);
 
-  if (!src) {
-    return (
-      <div className="player-wrap" style={{ minHeight: 200, display: 'grid', placeItems: 'center' }}>
-        <span style={{ color: 'var(--muted)' }}>Select a video</span>
-      </div>
-    );
-  }
-
   return (
     <div className="player-wrap" data-vjs-player>
-      <div ref={videoRef} />
+      <div className="player-host" ref={videoRef} />
+      {!src ? (
+        <div className="player-placeholder">
+          <span>Select a video</span>
+        </div>
+      ) : null}
     </div>
   );
 }
