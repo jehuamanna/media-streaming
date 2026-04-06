@@ -281,6 +281,42 @@ function resolveVodHlsOutDir(fileId, meta) {
 }
 
 const vodLocks = new Map();
+const vodFfmpegByFileId = new Map();
+const vodCancelRequested = new Set();
+
+function clearVodHlsCache(fileId) {
+  const meta = getFileMeta(fileId);
+  if (!meta || meta.kind === 'pdf') return false;
+  vodCancelRequested.add(fileId);
+  const ff = vodFfmpegByFileId.get(fileId);
+  if (ff && ff.exitCode === null) {
+    try {
+      ff.kill('SIGKILL');
+    } catch {
+      /* ignore */
+    }
+  }
+  const outDir = resolveVodHlsOutDir(fileId, meta);
+  if (outDir) {
+    try {
+      fs.rmSync(outDir, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  }
+  if (!vodLocks.has(fileId)) {
+    vodCancelRequested.delete(fileId);
+  }
+  return true;
+}
+
+function videoFileIdsForRoot(root) {
+  const ids = [];
+  for (const pl of root.playlists) {
+    for (const it of pl.items) ids.push(it.id);
+  }
+  return ids;
+}
 
 let vodTranscodeActive = 0;
 const vodTranscodeWaitQueue = [];
@@ -589,10 +625,24 @@ function ensureVodHls(fileId) {
     let stderr = '';
     let ff = null;
     await acquireVodTranscodeSlot();
+    if (vodCancelRequested.delete(fileId)) {
+      try {
+        releaseEncodingLock();
+      } catch {
+        /* ignore */
+      }
+      releaseVodTranscodeSlot();
+      vodLocks.delete(fileId);
+      const err = new Error('Cancelled');
+      err.code = 'CANCELLED';
+      settleHttp(err);
+      return;
+    }
     try {
       fs.rmSync(outDir, { recursive: true, force: true });
       fs.mkdirSync(outDir, { recursive: true });
       ff = spawn('ffmpeg', ffmpegVodArgs(meta, outDir), { stdio: ['ignore', 'ignore', 'pipe'] });
+      vodFfmpegByFileId.set(fileId, ff);
       ff.stderr?.on('data', (d) => {
         stderr += d.toString();
       });
@@ -622,6 +672,8 @@ function ensureVodHls(fileId) {
         }
       }
     } finally {
+      vodFfmpegByFileId.delete(fileId);
+      vodCancelRequested.delete(fileId);
       try {
         releaseEncodingLock();
       } catch {
@@ -1386,6 +1438,85 @@ app.post('/api/admin/transcode-all', authMiddleware(true), requireAdmin, (req, r
       transcodeAllJob = null;
     }
   })();
+});
+
+function parseAdminFileIdParam(raw) {
+  const s = decodeURIComponent(String(raw || ''));
+  return /^[a-f0-9]{32}$/.test(s) ? s : null;
+}
+
+app.get('/api/admin/vod/overview', authMiddleware(true), requireAdmin, (req, res) => {
+  libraryCache = { at: 0, data: null, fileMap: new Map() };
+  const { roots } = getLibrary();
+  const body = roots.map((root) => ({
+    id: root.id,
+    name: root.name,
+    playlists: root.playlists.map((pl) => ({
+      id: pl.id,
+      name: pl.name,
+      items: pl.items.map((it) => ({
+        id: it.id,
+        title: it.title,
+        ready: isVodHlsPlayable(it.id),
+        busy: vodLocks.has(it.id),
+      })),
+    })),
+  }));
+  res.json({ roots: body });
+});
+
+app.post('/api/admin/vod/transcode/:fileId', authMiddleware(true), requireAdmin, (req, res) => {
+  libraryCache = { at: 0, data: null, fileMap: new Map() };
+  const fileId = parseAdminFileIdParam(req.params.fileId);
+  if (!fileId) return res.status(400).json({ error: 'bad_file_id' });
+  const m = getFileMeta(fileId);
+  if (!m || m.kind === 'pdf') return res.status(404).json({ error: 'not_found' });
+  void ensureVodHls(fileId).catch((e) => {
+    if (e?.code && e.code !== 'NOT_FOUND' && e.code !== 'CANCELLED')
+      console.error('[admin vod transcode]', e);
+  });
+  res.json({ ok: true });
+});
+
+app.delete('/api/admin/vod/cache/:fileId', authMiddleware(true), requireAdmin, (req, res) => {
+  libraryCache = { at: 0, data: null, fileMap: new Map() };
+  const fileId = parseAdminFileIdParam(req.params.fileId);
+  if (!fileId) return res.status(400).json({ error: 'bad_file_id' });
+  if (!clearVodHlsCache(fileId)) return res.status(404).json({ error: 'not_found' });
+  res.json({ ok: true });
+});
+
+app.post('/api/admin/vod/transcode-root/:rootId', authMiddleware(true), requireAdmin, (req, res) => {
+  const rootId = decodeURIComponent(String(req.params.rootId || ''));
+  libraryCache = { at: 0, data: null, fileMap: new Map() };
+  const { roots } = getLibrary();
+  const root = roots.find((r) => r.id === rootId);
+  if (!root) return res.status(404).json({ error: 'not_found' });
+  const ids = videoFileIdsForRoot(root);
+  res.json({ ok: true, queued: ids.length });
+  void (async () => {
+    for (const id of ids) {
+      try {
+        await ensureVodHls(id);
+      } catch (e) {
+        if (e?.code !== 'CANCELLED') console.error(`[transcode-root] ${rootId} ${id}`, e?.message || e);
+      }
+    }
+  })();
+});
+
+app.delete('/api/admin/vod/cache-root/:rootId', authMiddleware(true), requireAdmin, (req, res) => {
+  const rootId = decodeURIComponent(String(req.params.rootId || ''));
+  libraryCache = { at: 0, data: null, fileMap: new Map() };
+  const { roots } = getLibrary();
+  const root = roots.find((r) => r.id === rootId);
+  if (!root) return res.status(404).json({ error: 'not_found' });
+  const ids = videoFileIdsForRoot(root);
+  let n = 0;
+  for (const id of ids) {
+    if (clearVodHlsCache(id)) n++;
+  }
+  res.json({ ok: true, cleared: n });
 });
 
 app.get('/api/admin/users', authMiddleware(true), requireAdmin, (req, res) => {

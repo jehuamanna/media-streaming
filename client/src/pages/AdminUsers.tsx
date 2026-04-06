@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+} from 'react';
 import { api } from '../api';
 
 type Row = {
@@ -36,6 +44,49 @@ type VisRoot = {
 type MainTab = 'users' | 'manage';
 type ManageSub = 'transcode' | 'visibility' | 'details';
 
+type VodItem = { id: string; title: string; ready: boolean; busy: boolean };
+type VodPlaylist = { id: string; name: string; items: VodItem[] };
+type VodRoot = { id: string; name: string; playlists: VodPlaylist[] };
+
+function vodFlattenItems(root: VodRoot): VodItem[] {
+  return root.playlists.flatMap((p) => p.items);
+}
+
+function vodRootStats(root: VodRoot) {
+  const items = vodFlattenItems(root);
+  if (items.length === 0) return { allReady: false, someReady: false, count: 0 };
+  const n = items.length;
+  const r = items.filter((i) => i.ready).length;
+  return { allReady: r === n, someReady: r > 0, count: n };
+}
+
+function VodCourseCheckbox({
+  allReady,
+  someReady,
+  disabled,
+  onChange,
+}: {
+  allReady: boolean;
+  someReady: boolean;
+  disabled?: boolean;
+  onChange: (e: ChangeEvent<HTMLInputElement>) => void;
+}) {
+  const ref = useRef<HTMLInputElement>(null);
+  useLayoutEffect(() => {
+    if (ref.current) ref.current.indeterminate = someReady && !allReady;
+  }, [someReady, allReady]);
+  return (
+    <input
+      ref={ref}
+      type="checkbox"
+      checked={allReady}
+      disabled={disabled}
+      onChange={onChange}
+      style={{ marginTop: '0.15rem', flexShrink: 0 }}
+    />
+  );
+}
+
 export default function AdminUsers() {
   const [mainTab, setMainTab] = useState<MainTab>('users');
   const [manageSub, setManageSub] = useState<ManageSub>('transcode');
@@ -61,11 +112,28 @@ export default function AdminUsers() {
   const [metaDescription, setMetaDescription] = useState('');
   const [metaLoading, setMetaLoading] = useState(false);
   const [metaMsg, setMetaMsg] = useState('');
+  const [vodOverview, setVodOverview] = useState<VodRoot[] | null>(null);
+  const [vodLoading, setVodLoading] = useState(false);
+  const [vodSelectedRootId, setVodSelectedRootId] = useState<string | null>(null);
+  const [vodMsg, setVodMsg] = useState('');
 
   async function loadUsers() {
     const r = await api<{ users: Row[] }>('/api/admin/users');
     setUsers(r.users);
   }
+
+  const loadVodOverview = useCallback(async (opts?: { quiet?: boolean }) => {
+    if (!opts?.quiet) setVodLoading(true);
+    setError('');
+    try {
+      const r = await api<{ roots: VodRoot[] }>('/api/admin/vod/overview');
+      setVodOverview(r.roots);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed');
+    } finally {
+      if (!opts?.quiet) setVodLoading(false);
+    }
+  }, []);
 
   const loadVisibility = useCallback(async () => {
     setVisLoading(true);
@@ -107,6 +175,35 @@ export default function AdminUsers() {
     if (mainTab !== 'manage' || manageSub !== 'visibility') return;
     void loadVisibility();
   }, [mainTab, manageSub, loadVisibility]);
+
+  useEffect(() => {
+    if (mainTab !== 'manage' || manageSub !== 'transcode') return;
+    void loadVodOverview();
+  }, [mainTab, manageSub, loadVodOverview]);
+
+  useEffect(() => {
+    if (!vodOverview?.length) {
+      setVodSelectedRootId(null);
+      return;
+    }
+    setVodSelectedRootId((prev) =>
+      prev && vodOverview.some((r) => r.id === prev) ? prev : vodOverview[0].id,
+    );
+  }, [vodOverview]);
+
+  const vodAnyBusy = useMemo(
+    () =>
+      vodOverview?.some((root) => root.playlists.some((pl) => pl.items.some((it) => it.busy))) ??
+      false,
+    [vodOverview],
+  );
+
+  useEffect(() => {
+    if (mainTab !== 'manage' || manageSub !== 'transcode') return;
+    if (!vodAnyBusy) return;
+    const t = window.setInterval(() => void loadVodOverview({ quiet: true }), 2000);
+    return () => clearInterval(t);
+  }, [mainTab, manageSub, vodAnyBusy, loadVodOverview]);
 
   useEffect(() => {
     if (mainTab !== 'manage' || manageSub !== 'details') return;
@@ -172,6 +269,54 @@ export default function AdminUsers() {
       await loadUsers();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed');
+    }
+  }
+
+  async function vodStartFile(fileId: string) {
+    setVodMsg('');
+    try {
+      await api(`/api/admin/vod/transcode/${encodeURIComponent(fileId)}`, { method: 'POST' });
+      await loadVodOverview({ quiet: true });
+    } catch (e) {
+      setVodMsg(e instanceof Error ? e.message : 'Failed');
+    }
+  }
+
+  async function vodClearFile(fileId: string) {
+    setVodMsg('');
+    try {
+      await api(`/api/admin/vod/cache/${encodeURIComponent(fileId)}`, { method: 'DELETE' });
+      await loadVodOverview({ quiet: true });
+    } catch (e) {
+      setVodMsg(e instanceof Error ? e.message : 'Failed');
+    }
+  }
+
+  async function vodStartCourse(rootId: string) {
+    setVodMsg('');
+    try {
+      const r = await api<{ ok: boolean; queued: number }>(
+        `/api/admin/vod/transcode-root/${encodeURIComponent(rootId)}`,
+        { method: 'POST' },
+      );
+      setVodMsg(`Queued ${r.queued} video(s).`);
+      await loadVodOverview({ quiet: true });
+    } catch (e) {
+      setVodMsg(e instanceof Error ? e.message : 'Failed');
+    }
+  }
+
+  async function vodClearCourse(rootId: string) {
+    setVodMsg('');
+    try {
+      const r = await api<{ ok: boolean; cleared: number }>(
+        `/api/admin/vod/cache-root/${encodeURIComponent(rootId)}`,
+        { method: 'DELETE' },
+      );
+      setVodMsg(`Cleared cache for ${r.cleared} video(s).`);
+      await loadVodOverview({ quiet: true });
+    } catch (e) {
+      setVodMsg(e instanceof Error ? e.message : 'Failed');
     }
   }
 
@@ -435,8 +580,192 @@ export default function AdminUsers() {
             <section className="form-panel">
               <h2 style={{ marginTop: 0 }}>Video library (HLS cache)</h2>
               <p style={{ color: 'var(--muted)', marginTop: 0 }}>
-                Transcode every video file under <code>VIDEOS_DIR</code> into the on-disk HLS cache. PDFs and{' '}
-                <code>code.zip</code> are skipped. Already-cached files are skipped quickly.
+                Select a course on the left. Checkboxes: checked means HLS is ready for playback. Uncheck to clear
+                cache (stop serving encoded segments). One check starts transcoding for that video or whole course.
+                PDFs are not listed.
+              </p>
+              {vodLoading && !vodOverview ? <p>Loading…</p> : null}
+              <div
+                style={{
+                  display: 'flex',
+                  flexDirection: 'row',
+                  flexWrap: 'wrap',
+                  gap: '1rem',
+                  alignItems: 'stretch',
+                  minHeight: 'min(70vh, 32rem)',
+                  marginBottom: '1rem',
+                }}
+              >
+                <div
+                  style={{
+                    flex: '0 0 15rem',
+                    minWidth: '13rem',
+                    minHeight: 0,
+                    border: '1px solid var(--border)',
+                    borderRadius: 14,
+                    padding: '0.65rem',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '0.45rem',
+                    maxHeight: '70vh',
+                    overflowY: 'auto',
+                  }}
+                >
+                  {vodOverview?.map((root) => {
+                    const stats = vodRootStats(root);
+                    return (
+                      <div
+                        key={root.id}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'flex-start',
+                          gap: '0.55rem',
+                          padding: '0.65rem 0.7rem',
+                          borderRadius: 12,
+                          border: '1px solid var(--border)',
+                          background:
+                            vodSelectedRootId === root.id
+                              ? 'color-mix(in srgb, var(--border) 35%, transparent)'
+                              : 'var(--surface)',
+                        }}
+                      >
+                        <VodCourseCheckbox
+                          allReady={stats.allReady}
+                          someReady={stats.someReady}
+                          disabled={stats.count === 0}
+                          onChange={(e) => {
+                            if (stats.count === 0) return;
+                            const wantOn = e.target.checked;
+                            if (wantOn) {
+                              void vodStartCourse(root.id);
+                            } else if (
+                              stats.someReady &&
+                              confirm(`Clear HLS cache for all videos in “${root.name}”?`)
+                            ) {
+                              void vodClearCourse(root.id);
+                            } else {
+                              e.target.checked = stats.allReady;
+                            }
+                          }}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setVodSelectedRootId(root.id)}
+                          style={{
+                            flex: 1,
+                            textAlign: 'left',
+                            background: 'none',
+                            border: 'none',
+                            color: 'inherit',
+                            cursor: 'pointer',
+                            fontWeight: vodSelectedRootId === root.id ? 700 : 500,
+                            padding: 0,
+                            fontSize: '0.95rem',
+                            lineHeight: 1.35,
+                          }}
+                        >
+                          {root.name}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div
+                  style={{
+                    flex: '1 1 18rem',
+                    minWidth: 0,
+                    minHeight: '12rem',
+                    border: '1px solid var(--border)',
+                    borderRadius: 14,
+                    padding: '0.75rem',
+                    overflowY: 'auto',
+                    maxHeight: '70vh',
+                  }}
+                >
+                  {(() => {
+                    const r = vodOverview?.find((x) => x.id === vodSelectedRootId);
+                    if (!r) {
+                      return (
+                        <p style={{ color: 'var(--muted)', margin: 0 }}>
+                          {vodOverview?.length ? 'Select a course.' : 'No courses found.'}
+                        </p>
+                      );
+                    }
+                    return (
+                      <>
+                        <div style={{ fontWeight: 700, marginBottom: '0.65rem' }}>{r.name}</div>
+                        {r.playlists.map((pl) => (
+                          <div key={pl.id} style={{ marginBottom: '0.85rem' }}>
+                            <div
+                              style={{
+                                fontSize: '0.8rem',
+                                fontWeight: 600,
+                                color: 'var(--muted)',
+                                marginBottom: '0.35rem',
+                                textTransform: 'uppercase',
+                                letterSpacing: '0.03em',
+                              }}
+                            >
+                              {pl.name}
+                            </div>
+                            <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+                              {pl.items.map((it) => (
+                                <li key={it.id} style={{ marginBottom: '0.35rem' }}>
+                                  <label
+                                    style={{
+                                      display: 'flex',
+                                      alignItems: 'center',
+                                      gap: '0.6rem',
+                                      padding: '0.45rem 0.65rem',
+                                      borderRadius: 10,
+                                      border: '1px solid var(--border)',
+                                      background: 'var(--surface)',
+                                      cursor: it.busy ? 'default' : 'pointer',
+                                      opacity: it.busy ? 0.72 : 1,
+                                    }}
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={it.ready}
+                                      disabled={it.busy}
+                                      title={it.busy ? 'Transcoding…' : undefined}
+                                      onChange={(e) => {
+                                        if (it.busy) {
+                                          e.target.checked = it.ready;
+                                          return;
+                                        }
+                                        const wantOn = e.target.checked;
+                                        if (wantOn && !it.ready) {
+                                          void vodStartFile(it.id);
+                                        } else if (!wantOn && it.ready) {
+                                          if (confirm(`Clear HLS cache for “${it.title}”?`)) void vodClearFile(it.id);
+                                          else e.target.checked = it.ready;
+                                        } else {
+                                          e.target.checked = it.ready;
+                                        }
+                                      }}
+                                    />
+                                    <span style={{ flex: 1, minWidth: 0, wordBreak: 'break-word' }}>{it.title}</span>
+                                    {it.busy ? (
+                                      <span style={{ fontSize: '0.75rem', color: 'var(--muted)', flexShrink: 0 }}>
+                                        Working…
+                                      </span>
+                                    ) : null}
+                                  </label>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        ))}
+                      </>
+                    );
+                  })()}
+                </div>
+              </div>
+              {vodMsg ? <p style={{ color: 'var(--muted)', marginTop: 0 }}>{vodMsg}</p> : null}
+              <h3 style={{ margin: '1.25rem 0 0.5rem', fontSize: '1.05rem' }}>Whole library</h3>
+              <p style={{ color: 'var(--muted)', marginTop: 0 }}>
+                Batch transcode every video under <code>VIDEOS_DIR</code>. Already-cached files are skipped quickly.
               </p>
               {transcode.running ? (
                 <p>
