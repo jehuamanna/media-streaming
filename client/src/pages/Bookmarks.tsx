@@ -38,9 +38,13 @@ export default function Bookmarks() {
                 {' '}
                 —{' '}
                 <Link
-                  to={`/course/${encodeURIComponent(b.rootId)}?play=${encodeURIComponent(b.fileId)}`}
+                  to={
+                    b.hlsUrl
+                      ? `/course/${encodeURIComponent(b.rootId)}?play=${encodeURIComponent(b.fileId)}`
+                      : `/course/${encodeURIComponent(b.rootId)}?pdf=${encodeURIComponent(b.fileId)}`
+                  }
                 >
-                  Play
+                  Open
                 </Link>
                 {' · '}
                 <Link to={`/course/${encodeURIComponent(b.rootId)}`}>Course</Link>

@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { api } from '../api';
 import { useAuth } from '../auth';
 
-type Root = { id: string; name: string; itemCount: number };
+type Root = { id: string; name: string; itemCount: number; pdfCount?: number; courseKind?: string };
 
 type ProgressRow = {
   fileId: string;
@@ -81,7 +81,20 @@ export default function Home() {
         {roots.map((r) => (
           <Link key={r.id} className="tile" to={`/course/${encodeURIComponent(r.id)}`}>
             <strong>{r.name}</strong>
-            <div className="count">{r.itemCount} video{r.itemCount === 1 ? '' : 's'}</div>
+            <div className="count">
+              {r.itemCount > 0 ? (
+                <>
+                  {r.itemCount} video{r.itemCount === 1 ? '' : 's'}
+                </>
+              ) : null}
+              {r.itemCount > 0 && (r.pdfCount ?? 0) > 0 ? ' · ' : null}
+              {(r.pdfCount ?? 0) > 0 ? (
+                <>
+                  {r.pdfCount} PDF{(r.pdfCount ?? 0) === 1 ? '' : 's'}
+                </>
+              ) : null}
+              {r.itemCount === 0 && (r.pdfCount ?? 0) === 0 ? 'Course' : null}
+            </div>
           </Link>
         ))}
       </div>

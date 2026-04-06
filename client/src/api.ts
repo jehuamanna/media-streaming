@@ -43,3 +43,19 @@ export async function api<T>(
   }
   return data as T;
 }
+
+export async function apiBlob(path: string): Promise<Blob> {
+  const headers: Record<string, string> = {};
+  const token = getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const res = await fetch(path, { headers });
+  if (res.status === 401) {
+    setToken(null);
+    window.dispatchEvent(new Event('auth:logout'));
+  }
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(t || res.statusText);
+  }
+  return res.blob();
+}

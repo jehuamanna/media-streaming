@@ -7,6 +7,7 @@ import { fileURLToPath } from 'url';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import Database from 'better-sqlite3';
+import Fuse from 'fuse.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -45,6 +46,25 @@ function walkMediaFiles(dir, baseDir, onFile) {
         const relFromVideos = path.relative(VIDEOS_DIR, full).replace(/\\/g, '/');
         onFile(full, relFromVideos);
       }
+    }
+  }
+}
+
+function walkPdfFiles(dir, onFile) {
+  let entries = [];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const e of entries) {
+    if (e.name.startsWith('.')) continue;
+    const full = path.join(dir, e.name);
+    if (e.isDirectory()) {
+      walkPdfFiles(full, onFile);
+    } else if (e.isFile() && path.extname(e.name).toLowerCase() === '.pdf') {
+      const relFromVideos = path.relative(VIDEOS_DIR, full).replace(/\\/g, '/');
+      onFile(full, relFromVideos);
     }
   }
 }
@@ -95,6 +115,7 @@ function buildLibrary() {
           rootId: rootName,
           playlistId: pl.name,
           title,
+          kind: 'video',
         });
       });
       items.sort((a, b) =>
@@ -136,6 +157,7 @@ function buildLibrary() {
         rootId: rootName,
         playlistId: '__root__',
         title,
+        kind: 'video',
       });
     }
     rootItems.sort((a, b) =>
@@ -155,11 +177,76 @@ function buildLibrary() {
       return a.name.localeCompare(b.name);
     });
     const itemCount = playlists.reduce((n, p) => n + p.items.length, 0);
+
+    const pdfs = [];
+    for (const pl of plEntries) {
+      if (!pl.isDirectory() || pl.name.startsWith('.')) continue;
+      const playlistPath = path.join(rootPath, pl.name);
+      walkPdfFiles(playlistPath, (absPath, relFromVideos) => {
+        const fileId = hashFileKey(relFromVideos);
+        const title = path.basename(absPath);
+        pdfs.push({
+          id: fileId,
+          title,
+          relativePath: relFromVideos,
+          playlistId: pl.name,
+        });
+        fileMap.set(fileId, {
+          absPath,
+          relFromVideos,
+          rootId: rootName,
+          playlistId: pl.name,
+          title,
+          kind: 'pdf',
+        });
+      });
+    }
+    for (const ent of plEntries) {
+      if (!ent.isFile() || ent.name.startsWith('.')) continue;
+      if (path.extname(ent.name).toLowerCase() !== '.pdf') continue;
+      const absPath = path.join(rootPath, ent.name);
+      let relFromVideos;
+      try {
+        relFromVideos = path.relative(VIDEOS_DIR, absPath).replace(/\\/g, '/');
+      } catch {
+        continue;
+      }
+      const fileId = hashFileKey(relFromVideos);
+      pdfs.push({
+        id: fileId,
+        title: ent.name,
+        relativePath: relFromVideos,
+        playlistId: '__root__',
+      });
+      fileMap.set(fileId, {
+        absPath,
+        relFromVideos,
+        rootId: rootName,
+        playlistId: '__root__',
+        title: ent.name,
+        kind: 'pdf',
+      });
+    }
+    pdfs.sort((a, b) =>
+      a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: 'base' }),
+    );
+
+    let hasMaterialsZip = false;
+    try {
+      const zp = path.join(rootPath, 'code.zip');
+      const st = fs.statSync(zp);
+      hasMaterialsZip = st.isFile();
+    } catch {
+      hasMaterialsZip = false;
+    }
+
     roots.push({
       id: rootName,
       name: rootName,
       playlists,
       itemCount,
+      pdfs,
+      hasMaterialsZip,
     });
   }
   return { roots, fileMap };
@@ -437,6 +524,11 @@ function ensureVodHls(fileId) {
     err.code = 'NOT_FOUND';
     return Promise.reject(err);
   }
+  if (meta.kind === 'pdf') {
+    const err = new Error('NOT_FOUND');
+    err.code = 'NOT_FOUND';
+    return Promise.reject(err);
+  }
   const outDir = path.join(HLS_VOD_DIR, fileId);
   const indexPath = path.join(outDir, 'index.m3u8');
   let srcMtime = 0;
@@ -552,6 +644,31 @@ function initDb() {
       PRIMARY KEY (user_id, file_id),
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
+    CREATE TABLE IF NOT EXISTS library_hidden_course (
+      root_id TEXT PRIMARY KEY
+    );
+    CREATE TABLE IF NOT EXISTS library_hidden_playlist (
+      root_id TEXT NOT NULL,
+      playlist_id TEXT NOT NULL,
+      PRIMARY KEY (root_id, playlist_id)
+    );
+    CREATE TABLE IF NOT EXISTS library_hidden_video (
+      file_id TEXT PRIMARY KEY
+    );
+    CREATE TABLE IF NOT EXISTS course_metadata (
+      root_id TEXT PRIMARY KEY,
+      category TEXT,
+      category_url TEXT,
+      added_at TEXT,
+      language TEXT,
+      description_markdown TEXT
+    );
+    CREATE TABLE IF NOT EXISTS media_duration (
+      file_id TEXT PRIMARY KEY,
+      duration_seconds REAL NOT NULL,
+      source_mtime_ms REAL NOT NULL,
+      updated_at TEXT NOT NULL
+    );
   `);
 
   const adminCount = db.prepare(`SELECT COUNT(*) AS c FROM users WHERE role = 'admin'`).get().c;
@@ -578,6 +695,198 @@ if (!JWT_SECRET || JWT_SECRET.length < 16) {
 }
 
 const db = initDb();
+
+function loadVisibilityState() {
+  const hiddenCourses = new Set(
+    db.prepare('SELECT root_id FROM library_hidden_course').all().map((r) => r.root_id),
+  );
+  const hiddenPlaylists = new Map();
+  for (const row of db.prepare('SELECT root_id, playlist_id FROM library_hidden_playlist').all()) {
+    if (!hiddenPlaylists.has(row.root_id)) hiddenPlaylists.set(row.root_id, new Set());
+    hiddenPlaylists.get(row.root_id).add(row.playlist_id);
+  }
+  const hiddenVideos = new Set(
+    db.prepare('SELECT file_id FROM library_hidden_video').all().map((r) => r.file_id),
+  );
+  return { hiddenCourses, hiddenPlaylists, hiddenVideos };
+}
+
+function playlistHiddenForRoot(vis, rootId, playlistId) {
+  return vis.hiddenPlaylists.get(rootId)?.has(playlistId) ?? false;
+}
+
+function filterRootsForLearner(roots, vis) {
+  const out = [];
+  for (const root of roots) {
+    if (vis.hiddenCourses.has(root.id)) continue;
+    const playlists = [];
+    for (const pl of root.playlists) {
+      if (playlistHiddenForRoot(vis, root.id, pl.id)) continue;
+      const items = pl.items.filter((it) => !vis.hiddenVideos.has(it.id));
+      playlists.push({ ...pl, items });
+    }
+    const pdfs = (root.pdfs || []).filter((pdf) => {
+      if (vis.hiddenVideos.has(pdf.id)) return false;
+      if (playlistHiddenForRoot(vis, root.id, pdf.playlistId)) return false;
+      return true;
+    });
+    const videoCount = playlists.reduce((n, p) => n + p.items.length, 0);
+    if (videoCount === 0 && pdfs.length === 0) continue;
+    let courseKind = 'video';
+    if (videoCount === 0 && pdfs.length > 0) courseKind = 'pdf';
+    else if (videoCount > 0 && pdfs.length > 0) courseKind = 'mixed';
+    out.push({
+      ...root,
+      playlists,
+      pdfs,
+      itemCount: videoCount,
+      pdfCount: pdfs.length,
+      courseKind,
+    });
+  }
+  return out;
+}
+
+function enrichRootForLibrary(root) {
+  const row = db.prepare('SELECT * FROM course_metadata WHERE root_id = ?').get(root.id);
+  const courseMeta = row
+    ? {
+        category: row.category || null,
+        categoryUrl: row.category_url || null,
+        addedAt: row.added_at || null,
+        language: row.language || null,
+        descriptionMarkdown: row.description_markdown || null,
+      }
+    : null;
+  const videoIds = [];
+  for (const pl of root.playlists) {
+    for (const it of pl.items) videoIds.push(it.id);
+  }
+  let durationSecondsTotal = null;
+  if (videoIds.length > 0) {
+    const stmt = db.prepare('SELECT duration_seconds FROM media_duration WHERE file_id = ?');
+    let sum = 0;
+    let n = 0;
+    for (const id of videoIds) {
+      const r = stmt.get(id);
+      if (r) {
+        sum += r.duration_seconds;
+        n++;
+      }
+    }
+    if (n > 0) durationSecondsTotal = sum;
+  }
+  const pdfs = (root.pdfs || []).map((p) => ({
+    id: p.id,
+    title: p.title,
+    relativePath: p.relativePath,
+    playlistId: p.playlistId,
+    url: `/api/documents/${p.id}`,
+  }));
+  return {
+    id: root.id,
+    name: root.name,
+    playlists: root.playlists,
+    itemCount: root.itemCount,
+    pdfCount: root.pdfCount,
+    courseKind: root.courseKind,
+    hasMaterialsZip: root.hasMaterialsZip,
+    pdfs,
+    courseMeta,
+    durationSecondsTotal,
+  };
+}
+
+function slugifyDownloadName(name) {
+  const s = String(name)
+    .replace(/[^\w\-.]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 120);
+  return s || 'course';
+}
+
+function isDocumentVisibleToLearner(fileId) {
+  const meta = getFileMeta(fileId);
+  if (!meta || meta.kind !== 'pdf') return false;
+  const vis = loadVisibilityState();
+  if (vis.hiddenCourses.has(meta.rootId)) return false;
+  if (playlistHiddenForRoot(vis, meta.rootId, meta.playlistId)) return false;
+  if (vis.hiddenVideos.has(fileId)) return false;
+  return true;
+}
+
+function isCourseMaterialsAllowed(rootId) {
+  const vis = loadVisibilityState();
+  return !vis.hiddenCourses.has(rootId) && fs.existsSync(path.join(VIDEOS_DIR, rootId));
+}
+
+function ffprobeDurationSeconds(absPath) {
+  return new Promise((resolve, reject) => {
+    const ff = spawn('ffprobe', [
+      '-v',
+      'error',
+      '-show_entries',
+      'format=duration',
+      '-of',
+      'default=noprint_wrappers=1:nokey=1',
+      absPath,
+    ]);
+    let out = '';
+    let errBuf = '';
+    ff.stdout?.on('data', (d) => {
+      out += d.toString();
+    });
+    ff.stderr?.on('data', (d) => {
+      errBuf += d.toString();
+    });
+    ff.on('error', reject);
+    ff.on('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(errBuf || `ffprobe exit ${code}`));
+        return;
+      }
+      const v = parseFloat(String(out).trim());
+      resolve(Number.isFinite(v) ? v : null);
+    });
+  });
+}
+
+function buildSearchIndex(roots) {
+  const entries = [];
+  for (const root of roots) {
+    entries.push({
+      type: 'course',
+      label: root.name,
+      path: root.name,
+      rootId: root.id,
+      fileId: null,
+      playlistId: null,
+    });
+    for (const pl of root.playlists) {
+      for (const it of pl.items) {
+        entries.push({
+          type: 'video',
+          label: it.title,
+          path: `${root.name}/${pl.name}/${it.title}`,
+          rootId: root.id,
+          fileId: it.id,
+          playlistId: pl.id,
+        });
+      }
+    }
+    for (const p of root.pdfs || []) {
+      entries.push({
+        type: 'pdf',
+        label: p.title,
+        path: p.relativePath.replace(/\\/g, '/'),
+        rootId: root.id,
+        fileId: p.id,
+        playlistId: p.playlistId,
+      });
+    }
+  }
+  return entries;
+}
 
 function signToken(user) {
   return jwt.sign(
@@ -681,8 +990,94 @@ app.get('/api/auth/me', authMiddleware(false), (req, res) => {
 
 app.get('/api/library', authMiddleware(true), (req, res) => {
   libraryCache = { at: 0, data: null, fileMap: new Map() };
-  const { data } = getLibrary();
-  res.json(data);
+  getLibrary();
+  const roots = libraryCache.data.roots;
+  const vis = loadVisibilityState();
+  const filtered = filterRootsForLearner(roots, vis);
+  res.json({ roots: filtered.map(enrichRootForLibrary) });
+});
+
+app.get('/api/search', authMiddleware(true), (req, res) => {
+  const q = String(req.query.q || '').trim();
+  const limit = Math.min(30, Math.max(1, parseInt(String(req.query.limit || '20'), 10) || 20));
+  if (q.length < 1) return res.json({ results: [] });
+  libraryCache = { at: 0, data: null, fileMap: new Map() };
+  getLibrary();
+  const vis = loadVisibilityState();
+  const roots = filterRootsForLearner(libraryCache.data.roots, vis);
+  const idx = buildSearchIndex(roots);
+  const fuse = new Fuse(idx, { keys: ['label', 'path'], threshold: 0.42, ignoreLocation: true });
+  const hits = fuse.search(q, { limit }).map((h) => h.item);
+  res.json({ results: hits.slice(0, limit) });
+});
+
+app.get('/api/similar-courses', authMiddleware(true), (req, res) => {
+  const rootId = decodeURIComponent(String(req.query.rootId || ''));
+  const limit = Math.min(20, Math.max(1, parseInt(String(req.query.limit || '8'), 10) || 8));
+  libraryCache = { at: 0, data: null, fileMap: new Map() };
+  getLibrary();
+  const vis = loadVisibilityState();
+  const enriched = filterRootsForLearner(libraryCache.data.roots, vis).map(enrichRootForLibrary);
+  const current = enriched.find((r) => r.id === rootId);
+  if (!current) return res.json({ courses: [] });
+  const others = enriched.filter((r) => r.id !== rootId);
+  const cat = (current.courseMeta?.category || '').trim().toLowerCase();
+  const fuse = new Fuse(others, { keys: ['name'], threshold: 0.52, includeScore: true });
+  const nameResults = fuse.search(current.name, { limit: 40 });
+  const byId = new Map();
+  for (const o of others) {
+    let score = 0;
+    const ocat = (o.courseMeta?.category || '').trim().toLowerCase();
+    if (cat && ocat && cat === ocat) score += 1000;
+    byId.set(o.id, { o, score });
+  }
+  for (const fr of nameResults) {
+    const id = fr.item.id;
+    const entry = byId.get(id);
+    if (entry) {
+      const fs = fr.score ?? 1;
+      entry.score += 400 / (1 + fs);
+    }
+  }
+  const sorted = [...byId.values()].sort((a, b) => b.score - a.score);
+  const courses = sorted.slice(0, limit).map(({ o }) => ({
+    id: o.id,
+    name: o.name,
+    itemCount: o.itemCount,
+    pdfCount: o.pdfCount,
+    courseKind: o.courseKind,
+    courseMeta: o.courseMeta,
+  }));
+  res.json({ courses });
+});
+
+app.get('/api/documents/:fileId', authMiddleware(true), (req, res) => {
+  const fileId = String(req.params.fileId || '');
+  if (!/^[0-9a-f]{32}$/.test(fileId)) return res.status(400).end();
+  if (!isDocumentVisibleToLearner(fileId)) return res.status(403).end();
+  const meta = getFileMeta(fileId);
+  if (!meta || meta.kind !== 'pdf') return res.status(404).end();
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(meta.title)}`);
+  res.sendFile(path.resolve(meta.absPath));
+});
+
+app.get('/api/course/:rootId/materials.zip', authMiddleware(true), (req, res) => {
+  const rootId = decodeURIComponent(req.params.rootId);
+  if (rootId.includes('..') || rootId.includes('/') || rootId.includes('\\')) {
+    return res.status(400).end();
+  }
+  if (!isCourseMaterialsAllowed(rootId)) return res.status(404).end();
+  const base = path.resolve(path.join(VIDEOS_DIR, rootId));
+  const rootResolved = path.resolve(VIDEOS_DIR);
+  if (!base.startsWith(rootResolved + path.sep) && base !== rootResolved) return res.status(400).end();
+  const zipPath = path.join(base, 'code.zip');
+  const resolved = path.resolve(zipPath);
+  if (!resolved.startsWith(base + path.sep)) return res.status(404).end();
+  if (!fs.existsSync(resolved)) return res.status(404).end();
+  const name = `${slugifyDownloadName(rootId)}-code.zip`;
+  res.setHeader('Content-Disposition', `attachment; filename="${name}"`);
+  res.sendFile(resolved);
 });
 
 function enrichBookmarkRow(row) {
@@ -767,7 +1162,8 @@ app.put('/api/progress', authMiddleware(true), (req, res) => {
   if (!fileId || typeof positionSeconds !== 'number' || !Number.isFinite(positionSeconds)) {
     return res.status(400).json({ error: 'fileId and positionSeconds required' });
   }
-  if (!getFileMeta(fileId)) {
+  const progMeta = getFileMeta(fileId);
+  if (!progMeta || progMeta.kind === 'pdf') {
     return res.status(400).json({ error: 'Invalid fileId' });
   }
   const key = `${req.user.id}:${fileId}`;
@@ -825,7 +1221,9 @@ app.post('/api/admin/transcode-all', authMiddleware(true), requireAdmin, (req, r
   }
   libraryCache = { at: 0, data: null, fileMap: new Map() };
   const { fileMap } = getLibrary();
-  const fileIds = [...fileMap.keys()];
+  const fileIds = [...fileMap.entries()]
+    .filter(([, m]) => m.kind !== 'pdf')
+    .map(([id]) => id);
   const startedAt = Date.now();
   transcodeAllJob = { total: fileIds.length, done: 0, currentFileId: null, startedAt };
   res.json({
@@ -902,6 +1300,140 @@ app.delete('/api/admin/users/:id', authMiddleware(true), requireAdmin, (req, res
   }
   db.prepare(`DELETE FROM users WHERE id = ?`).run(id);
   res.status(204).end();
+});
+
+app.get('/api/admin/library-visibility', authMiddleware(true), requireAdmin, (req, res) => {
+  libraryCache = { at: 0, data: null, fileMap: new Map() };
+  getLibrary();
+  const roots = libraryCache.data.roots;
+  const vis = loadVisibilityState();
+  const body = roots.map((root) => ({
+    id: root.id,
+    name: root.name,
+    hidden: vis.hiddenCourses.has(root.id),
+    playlists: root.playlists.map((pl) => ({
+      id: pl.id,
+      name: pl.name,
+      hidden: playlistHiddenForRoot(vis, root.id, pl.id),
+      items: pl.items.map((it) => ({
+        id: it.id,
+        title: it.title,
+        hidden: vis.hiddenVideos.has(it.id),
+      })),
+    })),
+    pdfs: (root.pdfs || []).map((p) => ({
+      id: p.id,
+      title: p.title,
+      hidden: vis.hiddenVideos.has(p.id),
+    })),
+  }));
+  res.json({ roots: body });
+});
+
+app.put('/api/admin/library-visibility', authMiddleware(true), requireAdmin, (req, res) => {
+  const { hiddenCourses = [], hiddenPlaylists = [], hiddenVideos = [] } = req.body || {};
+  const tx = db.transaction(() => {
+    db.prepare('DELETE FROM library_hidden_course').run();
+    db.prepare('DELETE FROM library_hidden_playlist').run();
+    db.prepare('DELETE FROM library_hidden_video').run();
+    const insC = db.prepare('INSERT INTO library_hidden_course (root_id) VALUES (?)');
+    const insP = db.prepare(
+      'INSERT INTO library_hidden_playlist (root_id, playlist_id) VALUES (?, ?)',
+    );
+    const insV = db.prepare('INSERT INTO library_hidden_video (file_id) VALUES (?)');
+    for (const id of hiddenCourses) insC.run(String(id));
+    for (const x of hiddenPlaylists) {
+      if (x?.rootId != null && x?.playlistId != null) {
+        insP.run(String(x.rootId), String(x.playlistId));
+      }
+    }
+    for (const id of hiddenVideos) insV.run(String(id));
+  });
+  tx();
+  res.json({ ok: true });
+});
+
+app.get('/api/admin/course-metadata/:rootId', authMiddleware(true), requireAdmin, (req, res) => {
+  const rootId = decodeURIComponent(req.params.rootId);
+  const row = db.prepare('SELECT * FROM course_metadata WHERE root_id = ?').get(rootId);
+  if (!row) {
+    return res.json({
+      rootId,
+      category: '',
+      categoryUrl: '',
+      addedAt: '',
+      language: '',
+      descriptionMarkdown: '',
+    });
+  }
+  res.json({
+    rootId: row.root_id,
+    category: row.category || '',
+    categoryUrl: row.category_url || '',
+    addedAt: row.added_at || '',
+    language: row.language || '',
+    descriptionMarkdown: row.description_markdown || '',
+  });
+});
+
+app.put('/api/admin/course-metadata/:rootId', authMiddleware(true), requireAdmin, (req, res) => {
+  const rootId = decodeURIComponent(req.params.rootId);
+  const { category, categoryUrl, addedAt, language, descriptionMarkdown } = req.body || {};
+  db.prepare(
+    `INSERT INTO course_metadata (root_id, category, category_url, added_at, language, description_markdown)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(root_id) DO UPDATE SET
+       category = excluded.category,
+       category_url = excluded.category_url,
+       added_at = excluded.added_at,
+       language = excluded.language,
+       description_markdown = excluded.description_markdown`,
+  ).run(
+    rootId,
+    category ?? null,
+    categoryUrl ?? null,
+    addedAt ?? null,
+    language ?? null,
+    descriptionMarkdown ?? null,
+  );
+  res.json({ ok: true });
+});
+
+app.post('/api/admin/media-duration/refresh', authMiddleware(true), requireAdmin, (req, res, next) => {
+  void (async () => {
+    try {
+      libraryCache = { at: 0, data: null, fileMap: new Map() };
+      getLibrary();
+      const { fileMap } = libraryCache;
+      const cap = Math.min(500, Math.max(1, parseInt(String(req.body?.cap || 200), 10) || 200));
+      const list = [...fileMap.entries()].filter(([, m]) => m.kind !== 'pdf');
+      let probed = 0;
+      let errors = 0;
+      for (let i = 0; i < Math.min(cap, list.length); i++) {
+        const [fileId, m] = list[i];
+        try {
+          const mtime = fs.statSync(m.absPath).mtimeMs;
+          const dur = await ffprobeDurationSeconds(m.absPath);
+          if (dur != null && Number.isFinite(dur)) {
+            db.prepare(
+              `INSERT INTO media_duration (file_id, duration_seconds, source_mtime_ms, updated_at)
+               VALUES (?, ?, ?, datetime('now'))
+               ON CONFLICT(file_id) DO UPDATE SET
+                 duration_seconds = excluded.duration_seconds,
+                 source_mtime_ms = excluded.source_mtime_ms,
+                 updated_at = excluded.updated_at`,
+            ).run(fileId, dur, mtime);
+          }
+          probed++;
+        } catch {
+          errors++;
+        }
+      }
+      res.json({ ok: true, probed, errors, total: list.length });
+    } catch (e) {
+      next(e);
+    }
+  })();
 });
 
 app.get('/api/vod/playable/:fileId', authMiddleware(true), (req, res) => {

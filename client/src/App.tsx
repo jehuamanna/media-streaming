@@ -1,5 +1,7 @@
 import type { ReactNode } from 'react';
-import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
+import { useEffect, useRef, useState } from 'react';
+import { Link, NavLink, Navigate, Route, Routes } from 'react-router-dom';
+import { api } from './api';
 import { useAuth } from './auth';
 import Login from './pages/Login';
 import ChangePassword from './pages/ChangePassword';
@@ -8,6 +10,95 @@ import Course from './pages/Course';
 import Bookmarks from './pages/Bookmarks';
 import Live from './pages/Live';
 import AdminUsers from './pages/AdminUsers';
+
+type SearchHit = {
+  type: string;
+  label: string;
+  path: string;
+  rootId: string;
+  fileId: string | null;
+  playlistId: string | null;
+};
+
+function GlobalSearch() {
+  const [q, setQ] = useState('');
+  const [results, setResults] = useState<SearchHit[]>([]);
+  const [open, setOpen] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (timer.current) clearTimeout(timer.current);
+    const qt = q.trim();
+    if (qt.length < 1) {
+      setResults([]);
+      setOpen(false);
+      return;
+    }
+    timer.current = setTimeout(() => {
+      void api<{ results: SearchHit[] }>(`/api/search?q=${encodeURIComponent(qt)}&limit=20`)
+        .then((r) => {
+          setResults(r.results);
+          setOpen(r.results.length > 0);
+        })
+        .catch(() => {
+          setResults([]);
+          setOpen(false);
+        });
+    }, 280);
+    return () => {
+      if (timer.current) clearTimeout(timer.current);
+    };
+  }, [q]);
+
+  function hrefFor(h: SearchHit): string {
+    if (h.type === 'course') return `/course/${encodeURIComponent(h.rootId)}`;
+    if (h.type === 'video' && h.fileId) {
+      return `/course/${encodeURIComponent(h.rootId)}?play=${encodeURIComponent(h.fileId)}`;
+    }
+    if (h.type === 'pdf' && h.fileId) {
+      return `/course/${encodeURIComponent(h.rootId)}?pdf=${encodeURIComponent(h.fileId)}`;
+    }
+    return `/course/${encodeURIComponent(h.rootId)}`;
+  }
+
+  return (
+    <div className="nav-search-wrap">
+      <input
+        type="search"
+        placeholder="Search…"
+        aria-label="Search library"
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+        onFocus={() => {
+          if (results.length) setOpen(true);
+        }}
+        onBlur={() => {
+          window.setTimeout(() => setOpen(false), 180);
+        }}
+      />
+      {open && results.length > 0 ? (
+        <div className="nav-search-results">
+          {results.map((h, i) => (
+            <Link
+              key={`${h.path}-${i}`}
+              to={hrefFor(h)}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => {
+                setOpen(false);
+                setQ('');
+              }}
+            >
+              <span>{h.label}</span>
+              <span className="nav-search-meta">
+                {h.type} · {h.path}
+              </span>
+            </Link>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 function NavBar() {
   const { user, logout } = useAuth();
@@ -28,11 +119,21 @@ function NavBar() {
           Admin
         </NavLink>
       ) : null}
-      <span className="spacer" />
-      <span style={{ color: 'var(--muted)', fontSize: '0.9rem' }}>{user.username}</span>
-      <button type="button" className="btn btn-ghost" onClick={logout}>
-        Log out
-      </button>
+      <GlobalSearch />
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '0.75rem',
+          marginLeft: 'auto',
+          flexShrink: 0,
+        }}
+      >
+        <span style={{ color: 'var(--muted)', fontSize: '0.9rem' }}>{user.username}</span>
+        <button type="button" className="btn btn-ghost" onClick={logout}>
+          Log out
+        </button>
+      </div>
     </nav>
   );
 }
