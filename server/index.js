@@ -312,6 +312,11 @@ function clearVodHlsCache(fileId) {
       /* ignore */
     }
   }
+  try {
+    fs.unlinkSync(vodEncodingLockPath(fileId));
+  } catch {
+    /* no lock or ENOENT */
+  }
   vodEncodeLastError.delete(fileId);
   if (!vodLocks.has(fileId)) {
     vodCancelRequested.delete(fileId);
@@ -370,6 +375,24 @@ const vodEncodingLockDir = path.join(HLS_VOD_DIR, '.locks');
 
 function vodEncodingLockPath(fileId) {
   return path.join(vodEncodingLockDir, `${fileId}.lock`);
+}
+
+/** True when lock file was created by a process that no longer exists (crash/restart left the file behind). */
+function vodEncodingLockIsOrphan(lockPath) {
+  try {
+    const raw = fs.readFileSync(lockPath, 'utf8').trim();
+    const line = (raw.split(/\r?\n/)[0] || '').trim();
+    const pid = parseInt(line, 10);
+    if (!Number.isFinite(pid) || pid < 2) return false;
+    try {
+      process.kill(pid, 0);
+      return false;
+    } catch (e) {
+      return e?.code === 'ESRCH';
+    }
+  } catch {
+    return false;
+  }
 }
 
 function vodIndexFresh(indexPath, srcMtime) {
@@ -467,11 +490,19 @@ function tryAcquireEncodingLock(fileId, depth = 0) {
       }
       return tryAcquireEncodingLock(fileId, depth + 1);
     }
+    if (vodEncodingLockIsOrphan(p)) {
+      try {
+        fs.unlinkSync(p);
+      } catch {
+        /* ignore */
+      }
+      return tryAcquireEncodingLock(fileId, depth + 1);
+    }
     return null;
   }
 }
 
-async function waitForVodFromPeer(fileId, outDir) {
+async function waitForVodFromPeer(fileId, outDir, opts) {
   const deadline = Date.now() + VOD_PLAYABLE_WAIT_MS;
   const lockP = vodEncodingLockPath(fileId);
   while (Date.now() < deadline) {
@@ -480,7 +511,7 @@ async function waitForVodFromPeer(fileId, outDir) {
     }
     if (!fs.existsSync(lockP)) {
       await new Promise((r) => setTimeout(r, 100));
-      return ensureVodHls(fileId, { ignoreCooldown: true });
+      return ensureVodHls(fileId, { ...opts, ignoreCooldown: true });
     }
     await new Promise((r) => setTimeout(r, 250));
   }
@@ -638,7 +669,7 @@ function ensureVodHls(fileId, opts = {}) {
 
   const releaseEncodingLock = tryAcquireEncodingLock(fileId);
   if (!releaseEncodingLock) {
-    return waitForVodFromPeer(fileId, outDir);
+    return waitForVodFromPeer(fileId, outDir, opts);
   }
 
   let resolveHttp;
@@ -675,8 +706,23 @@ function ensureVodHls(fileId, opts = {}) {
       return;
     }
     try {
-      fs.rmSync(outDir, { recursive: true, force: true });
-      fs.mkdirSync(outDir, { recursive: true });
+      try {
+        fs.rmSync(outDir, { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
+      try {
+        fs.mkdirSync(outDir, { recursive: true });
+      } catch (mkdirErr) {
+        const hint =
+          VOD_HLS_LAYOUT === 'sidecar'
+            ? ' With VOD_HLS_LAYOUT=sidecar, the *.hls folder is next to the video; VIDEOS_DIR must be writable, or use VOD_HLS_LAYOUT=central with a writable HLS_VOD_DIR.'
+            : ` Ensure HLS_VOD_DIR (${HLS_VOD_DIR}) exists and is writable.`;
+        const err = new Error(`Cannot create HLS output directory (${outDir}): ${mkdirErr?.message || mkdirErr}.${hint}`);
+        err.code = 'HLS_DIR';
+        throw err;
+      }
+      console.log(`[vod] ffmpeg start fileId=${fileId}`);
       ff = spawn('ffmpeg', ffmpegVodArgs(meta, outDir), { stdio: ['ignore', 'ignore', 'pipe'] });
       vodFfmpegByFileId.set(fileId, ff);
       ff.stderr?.on('data', (d) => {
@@ -693,6 +739,7 @@ function ensureVodHls(fileId, opts = {}) {
       await waitForFfmpegClose(ff, stderr);
     } catch (e) {
       if (e?.code !== 'CANCELLED') {
+        console.error(`[vod] encode failed fileId=${fileId}`, e?.message || e);
         vodEncodeLastError.set(fileId, {
           message: e?.message || String(e),
           code: e?.code || 'FAILED',
