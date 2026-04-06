@@ -1,0 +1,34 @@
+[Unit]
+Description=Media streaming (Node + nginx RTMP) via Docker
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+TimeoutStartSec=0
+TimeoutStopSec=45
+
+Environment=CONTAINER_NAME=media-streaming IMAGE=media-streaming:latest
+Environment=VIDEOS_PATH=/streaming/Videos DATA_VOLUME=media-streaming-data
+Environment=HTTP_PORT=8020 RTMP_PORT=1935 VIDEOS_MOUNT_SUFFIX=:ro
+EnvironmentFile=-/etc/media-streaming.env
+
+ExecStartPre=-/usr/bin/docker rm -f ${CONTAINER_NAME}
+ExecStartPre=/usr/bin/docker volume create ${DATA_VOLUME}
+ExecStart=/usr/bin/docker run --name ${CONTAINER_NAME} --rm \
+  -e JWT_SECRET -e ADMIN_INITIAL_PASSWORD -e VOD_HLS_LAYOUT \
+  -p ${HTTP_PORT}:8020 \
+  -p ${RTMP_PORT}:1935 \
+  -v ${VIDEOS_PATH}:/streaming/Videos${VIDEOS_MOUNT_SUFFIX} \
+  -v ${DATA_VOLUME}:/data \
+  ${IMAGE}
+
+ExecStop=-/usr/bin/docker stop -t 20 ${CONTAINER_NAME}
+
+[Install]
+WantedBy=multi-user.target
