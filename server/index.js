@@ -14,6 +14,12 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 8020);
 const VIDEOS_DIR = process.env.VIDEOS_DIR || '/streaming/Videos';
 const HLS_VOD_DIR = process.env.HLS_VOD_DIR || '/var/hls/vod';
+/**
+ * central (default): HLS under HLS_VOD_DIR/<fileId>/.
+ * sidecar: HLS next to each source file as <basename>.hls/ (moves with the media folder; requires write access under VIDEOS_DIR).
+ */
+const VOD_HLS_LAYOUT =
+  String(process.env.VOD_HLS_LAYOUT || 'central').toLowerCase() === 'sidecar' ? 'sidecar' : 'central';
 const VOD_FFMPEG_CONCURRENCY = Math.max(
   1,
   Number.parseInt(String(process.env.VOD_FFMPEG_CONCURRENCY || '2'), 10) || 2,
@@ -266,6 +272,14 @@ function getFileMeta(fileId) {
   return fileMap.get(fileId) || null;
 }
 
+function resolveVodHlsOutDir(fileId, meta) {
+  if (!meta || meta.kind === 'pdf') return null;
+  if (VOD_HLS_LAYOUT === 'sidecar') {
+    return path.join(path.dirname(meta.absPath), `${path.basename(meta.absPath)}.hls`);
+  }
+  return path.join(HLS_VOD_DIR, fileId);
+}
+
 const vodLocks = new Map();
 
 let vodTranscodeActive = 0;
@@ -319,13 +333,14 @@ function isVodHlsPlayable(fileId) {
   } catch {
     return false;
   }
-  const indexPath = path.join(HLS_VOD_DIR, fileId, 'index.m3u8');
+  const outDir = resolveVodHlsOutDir(fileId, meta);
+  if (!outDir) return false;
+  const indexPath = path.join(outDir, 'index.m3u8');
   if (!vodIndexFresh(indexPath, srcMtime)) return false;
   try {
     const txt = fs.readFileSync(indexPath, 'utf8');
     if (!txt.includes('#EXTINF')) return false;
     const lines = txt.split(/\r?\n/);
-    const outDir = path.dirname(indexPath);
     for (const line of lines) {
       const t = line.trim();
       if (t && !t.startsWith('#')) {
@@ -529,7 +544,12 @@ function ensureVodHls(fileId) {
     err.code = 'NOT_FOUND';
     return Promise.reject(err);
   }
-  const outDir = path.join(HLS_VOD_DIR, fileId);
+  const outDir = resolveVodHlsOutDir(fileId, meta);
+  if (!outDir) {
+    const err = new Error('NOT_FOUND');
+    err.code = 'NOT_FOUND';
+    return Promise.reject(err);
+  }
   const indexPath = path.join(outDir, 'index.m3u8');
   let srcMtime = 0;
   try {
@@ -1667,7 +1687,53 @@ async function vodEnsureHandler(req, res, next) {
   }
 }
 
-app.use('/hls/vod', authMiddleware(true), vodEnsureHandler, express.static(HLS_VOD_DIR));
+function vodHlsRelativePath(req) {
+  let p = req.path || '';
+  if (p.startsWith('/hls/vod')) {
+    p = p.slice('/hls/vod'.length) || '/';
+  }
+  return p;
+}
+
+function vodHlsStaticMiddleware(req, res, next) {
+  if (VOD_HLS_LAYOUT === 'central') {
+    express.static(HLS_VOD_DIR)(req, res, next);
+    return;
+  }
+  const m = vodHlsRelativePath(req).match(/^\/([0-9a-f]{32})\/(.+)$/);
+  if (!m) {
+    return res.status(404).end();
+  }
+  const fileId = m[1];
+  const assetRel = m[2];
+  if (assetRel.includes('..') || path.isAbsolute(assetRel)) {
+    return res.status(400).end();
+  }
+  const meta = getFileMeta(fileId);
+  if (!meta) {
+    return res.status(404).end();
+  }
+  const base = resolveVodHlsOutDir(fileId, meta);
+  if (!base) {
+    return res.status(404).end();
+  }
+  const resolvedBase = path.resolve(base);
+  const filePath = path.resolve(resolvedBase, assetRel);
+  const rel = path.relative(resolvedBase, filePath);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    return res.status(403).end();
+  }
+  res.sendFile(filePath, (err) => {
+    if (err) {
+      if (err.code === 'ENOENT') {
+        return res.status(404).end();
+      }
+      return next(err);
+    }
+  });
+}
+
+app.use('/hls/vod', authMiddleware(true), vodEnsureHandler, vodHlsStaticMiddleware);
 app.use('/hls/live', authMiddleware(true), express.static('/var/hls/live'));
 
 app.use(express.static(path.join(__dirname, 'public'), { index: false }));

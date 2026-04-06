@@ -31,6 +31,8 @@ Node serves the React app and API on **8020**; nginx ingests **RTMP** on **1935*
 
 4. **Live streaming:** publish to `rtmp://<host>:1935/live/<stream_key>` (e.g. OBS). In the app, use **Live** and enter the same `<stream_key>`.
 
+**Sidecar HLS cache:** To store transcoded HLS next to each video (so moving the whole course folder keeps the cache), set `VOD_HLS_LAYOUT=sidecar` and mount the library **read-write** (omit `:ro`), for example `-v /streaming/Videos:/streaming/Videos` plus `-e VOD_HLS_LAYOUT=sidecar`.
+
 ### Environment variables
 
 | Variable | Required | Description |
@@ -39,7 +41,8 @@ Node serves the React app and API on **8020**; nginx ingests **RTMP** on **1935*
 | `ADMIN_INITIAL_PASSWORD` | Only when the DB has no admin yet | Bootstrap password for user `admin` (min 8 chars). Ignored after an admin exists. |
 | `PORT` | No | HTTP port inside the container (default **8020**). |
 | `VIDEOS_DIR` | No | Library root (default **`/streaming/Videos`**). |
-| `HLS_VOD_DIR` | No | Cached VOD HLS output (default **`/var/hls/vod`**). |
+| `HLS_VOD_DIR` | No | Cached VOD HLS output when using **`central`** layout (default **`/var/hls/vod`**). Also used for encoding lock files (`.locks`) in all layouts. |
+| `VOD_HLS_LAYOUT` | No | **`central`** (default): HLS under `HLS_VOD_DIR/<fileId>/`. **`sidecar`**: HLS next to each video as `<name>.mp4.hls/` in the same folder as the source file—moves with the course folder and avoids re-transcoding when you relocate media; requires **write** access under `VIDEOS_DIR`. |
 | `DATABASE_PATH` | No | SQLite file (default **`/data/app.db`**). Mount a volume on `/data` to persist users and progress. |
 
 ### Library layout
@@ -51,6 +54,8 @@ Node serves the React app and API on **8020**; nginx ingests **RTMP** on **1935*
     <playlist>/                # optional: subfolder = separate playlist group
       ... media files, nested dirs allowed
 ```
+
+With **`VOD_HLS_LAYOUT=sidecar`**, each transcoded file also has a sibling directory such as **`lesson.mp4.hls/`** (HLS manifest and segments). Copy or move those together with the source video if you relocate courses. The scanner only treats known video extensions as playable files; contents of `*.hls` dirs are ignored for indexing.
 
 On the host, create **`/streaming/Videos`** (or bind another path to that mount target in Docker).
 
