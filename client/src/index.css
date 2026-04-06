@@ -304,6 +304,83 @@ button {
   padding: 1.25rem;
 }
 
+/* Admin master–detail (courses + content) needs full row width; default 400px collapses the right pane. */
+.form-panel.form-panel-wide {
+  max-width: none;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.admin-two-pane-head {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-bottom: 0.35rem;
+  align-items: baseline;
+}
+
+.admin-two-pane-head .admin-two-pane-col-left {
+  flex: 0 0 15rem;
+  min-width: 12rem;
+  max-width: 100%;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.admin-two-pane-head .admin-two-pane-col-right {
+  flex: 1 1 18rem;
+  min-width: 0;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.admin-two-pane {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 1rem;
+  align-items: stretch;
+  min-height: min(70vh, 32rem);
+  margin-bottom: 1rem;
+}
+
+.admin-two-pane .admin-two-pane-col-left {
+  flex: 0 0 15rem;
+  min-width: 12rem;
+  min-height: 0;
+  max-width: 100%;
+}
+
+.admin-two-pane .admin-two-pane-col-right {
+  flex: 1 1 18rem;
+  min-width: 0;
+}
+
+@media (max-width: 640px) {
+  .admin-two-pane-head {
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+
+  .admin-two-pane {
+    flex-direction: column;
+  }
+
+  .admin-two-pane .admin-two-pane-col-left,
+  .admin-two-pane .admin-two-pane-col-right {
+    flex: 1 1 auto;
+    width: 100%;
+    max-width: 100%;
+  }
+}
+
 .form-panel label {
   display: block;
   font-size: 0.85rem;

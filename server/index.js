@@ -84,11 +84,17 @@ function buildLibrary() {
   if (!fs.existsSync(VIDEOS_DIR)) {
     return { roots, fileMap };
   }
-  const rootDirs = fs
-    .readdirSync(VIDEOS_DIR, { withFileTypes: true })
-    .filter((d) => d.isDirectory() && !d.name.startsWith('.'))
-    .map((d) => d.name)
-    .sort((a, b) => a.localeCompare(b));
+  let rootDirs = [];
+  try {
+    rootDirs = fs
+      .readdirSync(VIDEOS_DIR, { withFileTypes: true })
+      .filter((d) => d.isDirectory() && !d.name.startsWith('.'))
+      .map((d) => d.name)
+      .sort((a, b) => a.localeCompare(b));
+  } catch (e) {
+    console.error('[buildLibrary] cannot read VIDEOS_DIR', VIDEOS_DIR, e);
+    return { roots, fileMap };
+  }
 
   for (const rootName of rootDirs) {
     const rootPath = path.join(VIDEOS_DIR, rootName);
@@ -1446,23 +1452,32 @@ function parseAdminFileIdParam(raw) {
 }
 
 app.get('/api/admin/vod/overview', authMiddleware(true), requireAdmin, (req, res) => {
-  libraryCache = { at: 0, data: null, fileMap: new Map() };
-  const { roots } = getLibrary();
-  const body = roots.map((root) => ({
-    id: root.id,
-    name: root.name,
-    playlists: root.playlists.map((pl) => ({
-      id: pl.id,
-      name: pl.name,
-      items: pl.items.map((it) => ({
-        id: it.id,
-        title: it.title,
-        ready: isVodHlsPlayable(it.id),
-        busy: vodLocks.has(it.id),
+  try {
+    libraryCache = { at: 0, data: null, fileMap: new Map() };
+    const { roots } = getLibrary();
+    const body = roots.map((root) => ({
+      id: root.id,
+      name: root.name,
+      playlists: root.playlists.map((pl) => ({
+        id: pl.id,
+        name: pl.name,
+        items: pl.items.map((it) => ({
+          id: it.id,
+          title: it.title,
+          ready: isVodHlsPlayable(it.id),
+          busy: vodLocks.has(it.id),
+        })),
       })),
-    })),
-  }));
-  res.json({ roots: body });
+    }));
+    res.json({ roots: body });
+  } catch (e) {
+    console.error('[admin vod overview]', e);
+    res.status(503).json({
+      error:
+        'Video library could not be loaded. Check server logs and that VIDEOS_DIR is readable.',
+      code: 'library_scan_failed',
+    });
+  }
 });
 
 app.post('/api/admin/vod/transcode/:fileId', authMiddleware(true), requireAdmin, (req, res) => {
@@ -1883,4 +1898,13 @@ app.use((err, req, res, next) => {
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`HTTP listening on ${PORT}`);
+  try {
+    const vOk = fs.existsSync(VIDEOS_DIR);
+    const hOk = fs.existsSync(HLS_VOD_DIR);
+    console.log(
+      `[config] VIDEOS_DIR=${VIDEOS_DIR} exists=${vOk} | HLS_VOD_DIR=${HLS_VOD_DIR} exists=${hOk} | VOD_HLS_LAYOUT=${VOD_HLS_LAYOUT}`,
+    );
+  } catch (e) {
+    console.error('[config] could not stat media paths', e);
+  }
 });

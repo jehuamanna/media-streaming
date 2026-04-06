@@ -38,8 +38,12 @@ export async function api<T>(
     }
   }
   if (!res.ok) {
-    const err = (data as { error?: string })?.error || res.statusText;
-    throw new Error(err);
+    const body = data && typeof data === 'object' ? (data as { error?: string; code?: string }) : {};
+    const msg =
+      body.code != null && body.code !== ''
+        ? `${body.code}: ${body.error || res.statusText}`
+        : body.error || res.statusText;
+    throw new Error(typeof msg === 'string' && msg ? msg : res.statusText);
   }
   return data as T;
 }

@@ -94,7 +94,9 @@ export default function AdminUsers() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [role, setRole] = useState<'user' | 'admin'>('user');
-  const [error, setError] = useState('');
+  const [usersError, setUsersError] = useState('');
+  const [vodError, setVodError] = useState('');
+  const [visError, setVisError] = useState('');
   const [transcode, setTranscode] = useState<TranscodeStatus>({ running: false });
   const [transcodeMsg, setTranscodeMsg] = useState('');
   const [durationMsg, setDurationMsg] = useState('');
@@ -124,12 +126,12 @@ export default function AdminUsers() {
 
   const loadVodOverview = useCallback(async (opts?: { quiet?: boolean }) => {
     if (!opts?.quiet) setVodLoading(true);
-    setError('');
+    setVodError('');
     try {
       const r = await api<{ roots: VodRoot[] }>('/api/admin/vod/overview');
       setVodOverview(r.roots);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed');
+      setVodError(e instanceof Error ? e.message : 'Failed');
     } finally {
       if (!opts?.quiet) setVodLoading(false);
     }
@@ -137,20 +139,20 @@ export default function AdminUsers() {
 
   const loadVisibility = useCallback(async () => {
     setVisLoading(true);
-    setError('');
+    setVisError('');
     try {
       const qs = visForUserId ? `?forUser=${encodeURIComponent(visForUserId)}` : '';
       const r = await api<{ roots: VisRoot[] }>(`/api/admin/library-visibility${qs}`);
       setVisRoots(r.roots);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed');
+      setVisError(e instanceof Error ? e.message : 'Failed');
     } finally {
       setVisLoading(false);
     }
   }, [visForUserId]);
 
   useEffect(() => {
-    void loadUsers().catch((e) => setError(e instanceof Error ? e.message : 'Failed'));
+    void loadUsers().catch((e) => setUsersError(e instanceof Error ? e.message : 'Failed'));
   }, []);
 
   useEffect(() => {
@@ -250,25 +252,25 @@ export default function AdminUsers() {
 
   async function onCreate(e: React.FormEvent) {
     e.preventDefault();
-    setError('');
+    setUsersError('');
     try {
       await api('/api/admin/users', { method: 'POST', json: { username, password, role } });
       setUsername('');
       setPassword('');
       await loadUsers();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed');
+      setUsersError(err instanceof Error ? err.message : 'Failed');
     }
   }
 
   async function remove(id: number) {
     if (!confirm('Delete this user?')) return;
-    setError('');
+    setUsersError('');
     try {
       await api(`/api/admin/users/${id}`, { method: 'DELETE' });
       await loadUsers();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed');
+      setUsersError(err instanceof Error ? err.message : 'Failed');
     }
   }
 
@@ -322,7 +324,7 @@ export default function AdminUsers() {
 
   async function startTranscodeAll() {
     setTranscodeMsg('');
-    setError('');
+    setVodError('');
     try {
       const r = await api<{ ok: boolean; queued: number; message: string }>(
         '/api/admin/transcode-all',
@@ -337,14 +339,14 @@ export default function AdminUsers() {
         setTranscode({ running: true });
         void api<TranscodeStatus>('/api/admin/transcode-all/status').then(setTranscode);
       } else {
-        setError(msg);
+        setVodError(msg);
       }
     }
   }
 
   async function refreshDurations() {
     setDurationMsg('');
-    setError('');
+    setVodError('');
     try {
       const r = await api<{ probed: number; errors: number; total: number }>(
         '/api/admin/media-duration/refresh',
@@ -352,7 +354,7 @@ export default function AdminUsers() {
       );
       setDurationMsg(`Probed ${r.probed} of ${r.total} (${r.errors} errors).`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed');
+      setVodError(e instanceof Error ? e.message : 'Failed');
     }
   }
 
@@ -415,7 +417,7 @@ export default function AdminUsers() {
   async function saveVisibility() {
     if (!visRoots) return;
     setVisSaving(true);
-    setError('');
+    setVisError('');
     try {
       const hiddenCourses = visRoots.filter((r) => r.hidden).map((r) => r.id);
       const hiddenPlaylists: { rootId: string; playlistId: string }[] = [];
@@ -444,7 +446,7 @@ export default function AdminUsers() {
       });
       await loadVisibility();
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed');
+      setVisError(e instanceof Error ? e.message : 'Failed');
     } finally {
       setVisSaving(false);
     }
@@ -468,7 +470,6 @@ export default function AdminUsers() {
   async function saveMetadata() {
     if (!metaRootId) return;
     setMetaMsg('');
-    setError('');
     try {
       await api(`/api/admin/course-metadata/${encodeURIComponent(metaRootId)}`, {
         method: 'PUT',
@@ -489,7 +490,13 @@ export default function AdminUsers() {
   return (
     <div className="app-shell">
       <h1>Admin</h1>
-      {error ? <div className="error">{error}</div> : null}
+      {mainTab === 'users' && usersError ? <div className="error">{usersError}</div> : null}
+      {mainTab === 'manage' && manageSub === 'transcode' && vodError ? (
+        <div className="error">{vodError}</div>
+      ) : null}
+      {mainTab === 'manage' && manageSub === 'visibility' && visError ? (
+        <div className="error">{visError}</div>
+      ) : null}
       <div className="admin-tabs" style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.25rem' }}>
         <button
           type="button"
@@ -577,7 +584,7 @@ export default function AdminUsers() {
           </div>
 
           {manageSub === 'transcode' ? (
-            <section className="form-panel">
+            <section className="form-panel form-panel-wide">
               <h2 style={{ marginTop: 0 }}>Video library (HLS cache)</h2>
               <p style={{ color: 'var(--muted)', marginTop: 0 }}>
                 Select a course on the left. Checkboxes: checked means HLS is ready for playback. Uncheck to clear
@@ -585,22 +592,14 @@ export default function AdminUsers() {
                 PDFs are not listed.
               </p>
               {vodLoading && !vodOverview ? <p>Loading…</p> : null}
-              <div
-                style={{
-                  display: 'flex',
-                  flexDirection: 'row',
-                  flexWrap: 'wrap',
-                  gap: '1rem',
-                  alignItems: 'stretch',
-                  minHeight: 'min(70vh, 32rem)',
-                  marginBottom: '1rem',
-                }}
-              >
+              <div className="admin-two-pane-head">
+                <div className="admin-two-pane-col-left">Courses</div>
+                <div className="admin-two-pane-col-right">Videos</div>
+              </div>
+              <div className="admin-two-pane">
                 <div
+                  className="admin-two-pane-col-left"
                   style={{
-                    flex: '0 0 15rem',
-                    minWidth: '13rem',
-                    minHeight: 0,
                     border: '1px solid var(--border)',
                     borderRadius: 14,
                     padding: '0.65rem',
@@ -671,9 +670,8 @@ export default function AdminUsers() {
                   })}
                 </div>
                 <div
+                  className="admin-two-pane-col-right"
                   style={{
-                    flex: '1 1 18rem',
-                    minWidth: 0,
                     minHeight: '12rem',
                     border: '1px solid var(--border)',
                     borderRadius: 14,
@@ -801,7 +799,7 @@ export default function AdminUsers() {
           ) : null}
 
           {manageSub === 'visibility' ? (
-            <section className="form-panel">
+            <section className="form-panel form-panel-wide">
               <h2 style={{ marginTop: 0 }}>Show / hide in library</h2>
               <label htmlFor="vis-user">Visibility applies to</label>
               <select
@@ -823,22 +821,14 @@ export default function AdminUsers() {
                   : 'Select a course on the left (scroll if needed), then adjust playlists, videos, and PDFs in the scrollable panel on the right. Uncheck to hide from learners.'}
               </p>
               {visLoading ? <p>Loading…</p> : null}
-              <div
-                style={{
-                  display: 'flex',
-                  flexDirection: 'row',
-                  flexWrap: 'wrap',
-                  gap: '1rem',
-                  alignItems: 'stretch',
-                  minHeight: 'min(70vh, 32rem)',
-                  marginBottom: '1rem',
-                }}
-              >
+              <div className="admin-two-pane-head">
+                <div className="admin-two-pane-col-left">Courses</div>
+                <div className="admin-two-pane-col-right">Content</div>
+              </div>
+              <div className="admin-two-pane">
                 <div
+                  className="admin-two-pane-col-left"
                   style={{
-                    flex: '0 0 14rem',
-                    minWidth: '12rem',
-                    minHeight: 0,
                     border: '1px solid var(--border)',
                     borderRadius: '6px',
                     padding: '0.5rem',
@@ -893,9 +883,8 @@ export default function AdminUsers() {
                   ))}
                 </div>
                 <div
+                  className="admin-two-pane-col-right"
                   style={{
-                    flex: '1 1 18rem',
-                    minWidth: 0,
                     minHeight: '12rem',
                     border: '1px solid var(--border)',
                     borderRadius: '6px',
@@ -999,7 +988,7 @@ export default function AdminUsers() {
           ) : null}
 
           {manageSub === 'details' ? (
-            <section className="form-panel">
+            <section className="form-panel form-panel-wide">
               <h2 style={{ marginTop: 0 }}>Course metadata</h2>
               <label htmlFor="cr">Course folder</label>
               <select
