@@ -1,6 +1,6 @@
 # Media streaming (live RTMP + VOD HLS)
 
-Node serves the React app and API on **8020**; nginx ingests **RTMP** on **1935** and writes live HLS to disk. VOD is transcoded from **`/streaming/Videos`** (hardcoded default; override with `VIDEOS_DIR` if needed).
+Node serves the React app and API on **8020**; nginx ingests **RTMP** on **1935** and writes live HLS to disk. VOD is transcoded from **`/streaming/Videos`** (default; override with `VIDEOS_DIR`). By default, each video’s HLS cache is stored **next to that file** as **`<name>.<ext>.hls/`** (see `VOD_HLS_LAYOUT`).
 
 ## Prerequisites
 
@@ -22,7 +22,7 @@ Node serves the React app and API on **8020**; nginx ingests **RTMP** on **1935*
      -e ADMIN_INITIAL_PASSWORD='replace-with-strong-temp-password-min-8' \
      -p 8020:8020 \
      -p 1935:1935 \
-     -v /streaming/Videos:/streaming/Videos:ro \
+     -v /streaming/Videos:/streaming/Videos \
      -v media-streaming-data:/data \
      media-streaming:latest
    ```
@@ -31,7 +31,7 @@ Node serves the React app and API on **8020**; nginx ingests **RTMP** on **1935*
 
 4. **Live streaming:** publish to `rtmp://<host>:1935/live/<stream_key>` (e.g. OBS). In the app, use **Live** and enter the same `<stream_key>`.
 
-**Sidecar HLS cache:** To store transcoded HLS next to each video (so moving the whole course folder keeps the cache), set `VOD_HLS_LAYOUT=sidecar` and mount the library **read-write** (omit `:ro`), for example `-v /streaming/Videos:/streaming/Videos` plus `-e VOD_HLS_LAYOUT=sidecar`.
+**Central HLS (optional):** To keep the library mount **read-only** and store all VOD HLS under a separate path, set **`VOD_HLS_LAYOUT=central`**, mount **`HLS_VOD_DIR`** on a writable volume (default in the image is **`/var/hls/vod`**), and use e.g. **`-v /streaming/Videos:/streaming/Videos:ro`**.
 
 ### Environment variables
 
@@ -42,7 +42,7 @@ Node serves the React app and API on **8020**; nginx ingests **RTMP** on **1935*
 | `PORT` | No | HTTP port inside the container (default **8020**). |
 | `VIDEOS_DIR` | No | Library root (default **`/streaming/Videos`**). |
 | `HLS_VOD_DIR` | No | Cached VOD HLS output when using **`central`** layout (default **`/var/hls/vod`**). Also used for encoding lock files (`.locks`) in all layouts. |
-| `VOD_HLS_LAYOUT` | No | **`central`** (default): HLS under `HLS_VOD_DIR/<fileId>/`. **`sidecar`**: HLS next to each video as `<name>.mp4.hls/` in the same folder as the source file—moves with the course folder and avoids re-transcoding when you relocate media; requires **write** access under `VIDEOS_DIR`. |
+| `VOD_HLS_LAYOUT` | No | **`sidecar`** (default): HLS next to each video as `<name>.mp4.hls/` in the same folder as the source file—persists with the media tree; requires **write** access under `VIDEOS_DIR`. **`central`**: HLS under `HLS_VOD_DIR/<fileId>/` (library can be read-only if that volume is writable). |
 | `DATABASE_PATH` | No | SQLite file (default **`/data/app.db`**). Mount a volume on `/data` to persist users and progress. |
 
 ### Library layout
@@ -55,7 +55,7 @@ Node serves the React app and API on **8020**; nginx ingests **RTMP** on **1935*
       ... media files, nested dirs allowed
 ```
 
-With **`VOD_HLS_LAYOUT=sidecar`**, each transcoded file also has a sibling directory such as **`lesson.mp4.hls/`** (HLS manifest and segments). Copy or move those together with the source video if you relocate courses. The scanner only treats known video extensions as playable files; contents of `*.hls` dirs are ignored for indexing.
+By default (**`sidecar`**), each transcoded file has a sibling directory such as **`lesson.mp4.hls/`** (HLS manifest and segments). Copy or move those together with the source video if you relocate courses. The scanner skips **`*.hls`** directories when walking the tree (they are not indexed as courses or playlists).
 
 On the host, create **`/streaming/Videos`** (or bind another path to that mount target in Docker).
 
@@ -71,6 +71,7 @@ export JWT_SECRET='dev-secret-at-least-16'
 export ADMIN_INITIAL_PASSWORD='devpass12345'
 sudo mkdir -p /streaming/Videos
 export VIDEOS_DIR='/streaming/Videos'
+# Default layout writes HLS next to each video; the library directory must be writable.
 node index.js
 ```
 

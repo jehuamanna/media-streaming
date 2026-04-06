@@ -15,7 +15,7 @@ TimeoutStopSec=45
 
 Environment=CONTAINER_NAME=media-streaming IMAGE=media-streaming:latest
 Environment=VIDEOS_PATH=/streaming/Videos DATA_VOLUME=media-streaming-data
-Environment=HTTP_PORT=8020 RTMP_PORT=1935 VIDEOS_MOUNT_SUFFIX=:ro
+Environment=HTTP_PORT=8020 RTMP_PORT=1935 VIDEOS_MOUNT_SUFFIX= VOD_HLS_LAYOUT=sidecar
 EnvironmentFile=-/etc/media-streaming.env
 
 ExecStartPre=-/usr/bin/docker rm -f ${CONTAINER_NAME}

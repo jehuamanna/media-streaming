@@ -27,6 +27,7 @@ RUN mkdir -p server/public && cp -r client/dist/* server/public/
 ENV NODE_ENV=production
 ENV PORT=8020
 ENV VIDEOS_DIR=/streaming/Videos
+ENV VOD_HLS_LAYOUT=sidecar
 ENV HLS_VOD_DIR=/var/hls/vod
 ENV DATABASE_PATH=/data/app.db
 

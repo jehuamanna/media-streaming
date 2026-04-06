@@ -26,7 +26,7 @@
       ADMIN_INITIAL_PASSWORD_CRED_ID
   Optional deploy paths / names (job env):
       DEPLOY_CONTAINER_NAME   default: media-streaming
-      DEPLOY_VIDEOS_PATH      host path mounted read-only as /streaming/Videos (default: /streaming/Videos)
+      DEPLOY_VIDEOS_PATH      host path mounted read-write as /streaming/Videos for sidecar HLS cache (default: /streaming/Videos)
       DEPLOY_DATA_VOLUME      named Docker volume for SQLite (default: media-streaming-data)
       DEPLOY_HOST_PORT_HTTP   host port for 8020 (default: 8020)
       DEPLOY_HOST_PORT_RTMP   host port for 1935 (default: 1935)
@@ -197,7 +197,7 @@ pipeline {
                 -e ADMIN_INITIAL_PASSWORD="\$ADMIN_INITIAL_PASSWORD" \\
                 -p ${pHttp}:8020 \\
                 -p ${pRtmp}:1935 \\
-                -v "${videosPath}:/streaming/Videos:ro" \\
+                -v "${videosPath}:/streaming/Videos" \\
                 -v ${dataVol}:/data \\
                 ${img}
             """

@@ -15,11 +15,11 @@ const PORT = Number(process.env.PORT || 8020);
 const VIDEOS_DIR = process.env.VIDEOS_DIR || '/streaming/Videos';
 const HLS_VOD_DIR = process.env.HLS_VOD_DIR || '/var/hls/vod';
 /**
- * central (default): HLS under HLS_VOD_DIR/<fileId>/.
- * sidecar: HLS next to each source file as <basename>.hls/ (moves with the media folder; requires write access under VIDEOS_DIR).
+ * sidecar (default): HLS next to each source file as <basename>.hls/ (persists with the media folder; requires write access under VIDEOS_DIR).
+ * central: HLS under HLS_VOD_DIR/<fileId>/ (e.g. read-only library mount + writable HLS volume).
  */
 const VOD_HLS_LAYOUT =
-  String(process.env.VOD_HLS_LAYOUT || 'central').toLowerCase() === 'sidecar' ? 'sidecar' : 'central';
+  String(process.env.VOD_HLS_LAYOUT || 'sidecar').toLowerCase() === 'central' ? 'central' : 'sidecar';
 const VOD_FFMPEG_CONCURRENCY = Math.max(
   1,
   Number.parseInt(String(process.env.VOD_FFMPEG_CONCURRENCY || '2'), 10) || 2,
@@ -45,6 +45,7 @@ function walkMediaFiles(dir, baseDir, onFile) {
     if (e.name.startsWith('.')) continue;
     const full = path.join(dir, e.name);
     if (e.isDirectory()) {
+      if (e.name.endsWith('.hls')) continue;
       walkMediaFiles(full, baseDir, onFile);
     } else if (e.isFile()) {
       const ext = path.extname(e.name).toLowerCase();
@@ -67,6 +68,7 @@ function walkPdfFiles(dir, onFile) {
     if (e.name.startsWith('.')) continue;
     const full = path.join(dir, e.name);
     if (e.isDirectory()) {
+      if (e.name.endsWith('.hls')) continue;
       walkPdfFiles(full, onFile);
     } else if (e.isFile() && path.extname(e.name).toLowerCase() === '.pdf') {
       const relFromVideos = path.relative(VIDEOS_DIR, full).replace(/\\/g, '/');
