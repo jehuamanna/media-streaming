@@ -297,7 +297,9 @@ export default function Course() {
           className="course-meta-strip"
           style={{
             display: 'flex',
+            flexDirection: 'row',
             flexWrap: 'wrap',
+            alignItems: 'flex-start',
             gap: '1.25rem 2rem',
             padding: '1rem 0 1.25rem',
             borderBottom: '1px solid var(--border)',
@@ -305,7 +307,7 @@ export default function Course() {
           }}
         >
           {durLabel ? (
-            <div>
+            <div style={{ flex: '0 1 auto' }}>
               <div style={{ fontSize: '0.7rem', color: 'var(--muted)', textTransform: 'uppercase' }}>
                 Duration
               </div>
@@ -313,7 +315,7 @@ export default function Course() {
             </div>
           ) : null}
           {categoryList.length > 0 ? (
-            <div style={{ flex: '1 1 100%', minWidth: 'min(100%, 12rem)' }}>
+            <div style={{ flex: '0 1 auto', minWidth: 0, maxWidth: '100%' }}>
               <div style={{ fontSize: '0.7rem', color: 'var(--muted)', textTransform: 'uppercase' }}>
                 Categories
               </div>
@@ -342,7 +344,7 @@ export default function Course() {
             </div>
           ) : null}
           {tagList.length > 0 ? (
-            <div style={{ flex: '1 1 100%', minWidth: 'min(100%, 12rem)' }}>
+            <div style={{ flex: '0 1 auto', minWidth: 0, maxWidth: '100%' }}>
               <div style={{ fontSize: '0.7rem', color: 'var(--muted)', textTransform: 'uppercase' }}>
                 Tags
               </div>
@@ -365,7 +367,7 @@ export default function Course() {
             </div>
           ) : null}
           {root.itemCount > 0 ? (
-            <div>
+            <div style={{ flex: '0 1 auto' }}>
               <div style={{ fontSize: '0.7rem', color: 'var(--muted)', textTransform: 'uppercase' }}>
                 Lessons
               </div>
@@ -375,7 +377,7 @@ export default function Course() {
             </div>
           ) : null}
           {(root.pdfCount ?? 0) > 0 ? (
-            <div>
+            <div style={{ flex: '0 1 auto' }}>
               <div style={{ fontSize: '0.7rem', color: 'var(--muted)', textTransform: 'uppercase' }}>
                 Documents
               </div>
@@ -385,7 +387,7 @@ export default function Course() {
             </div>
           ) : null}
           {meta?.addedAt ? (
-            <div>
+            <div style={{ flex: '0 1 auto' }}>
               <div style={{ fontSize: '0.7rem', color: 'var(--muted)', textTransform: 'uppercase' }}>
                 Added date
               </div>
@@ -471,15 +473,16 @@ export default function Course() {
           <div>
             {flatItems.length > 0 ? (
               <>
-                <VideoPlayer
-                  src={current ? current.hlsUrl : null}
-                  fileId={current?.id ?? null}
-                  nextSrc={nextInQueue?.hlsUrl ?? null}
-                  nextFileId={nextInQueue?.id ?? null}
-                  onEnded={onEnded}
-                />
                 {current ? (
-                  <div style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                  <div
+                    style={{
+                      marginBottom: '0.75rem',
+                      display: 'flex',
+                      gap: '0.5rem',
+                      flexWrap: 'wrap',
+                      alignItems: 'center',
+                    }}
+                  >
                     <span style={{ flex: 1, minWidth: 200 }}>{current.title}</span>
                     <button
                       type="button"
@@ -489,9 +492,15 @@ export default function Course() {
                       {bookmarked.has(current.id) ? 'Remove bookmark' : 'Bookmark'}
                     </button>
                   </div>
-                ) : (
-                  <p style={{ color: 'var(--muted)' }}>No videos in this course.</p>
-                )}
+                ) : null}
+                <VideoPlayer
+                  src={current ? current.hlsUrl : null}
+                  fileId={current?.id ?? null}
+                  nextSrc={nextInQueue?.hlsUrl ?? null}
+                  nextFileId={nextInQueue?.id ?? null}
+                  onEnded={onEnded}
+                />
+                {!current ? <p style={{ color: 'var(--muted)' }}>No videos in this course.</p> : null}
               </>
             ) : (
               <p style={{ color: 'var(--muted)' }}>No videos in this course.</p>
