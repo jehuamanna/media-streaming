@@ -27,8 +27,8 @@ type CourseMeta = {
   category: string | null;
   categoryUrl: string | null;
   addedAt: string | null;
-  language: string | null;
   descriptionMarkdown: string | null;
+  tags?: string[];
 };
 
 type Root = {
@@ -257,13 +257,14 @@ export default function Course() {
 
   const meta = root?.courseMeta;
   const durLabel = formatDuration(root?.durationSecondsTotal ?? undefined);
+  const tagList = meta?.tags?.length ? meta.tags : [];
   const hasDetailStrip =
     durLabel ||
     meta?.category ||
+    tagList.length > 0 ||
     root?.itemCount != null ||
     (root?.pdfCount ?? 0) > 0 ||
-    meta?.addedAt ||
-    meta?.language;
+    meta?.addedAt;
 
   if (error && !root) {
     return (
@@ -325,6 +326,29 @@ export default function Course() {
               </div>
             </div>
           ) : null}
+          {tagList.length > 0 ? (
+            <div style={{ flex: '1 1 100%', minWidth: 'min(100%, 12rem)' }}>
+              <div style={{ fontSize: '0.7rem', color: 'var(--muted)', textTransform: 'uppercase' }}>
+                Tags
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem', marginTop: '0.25rem' }}>
+                {tagList.map((t) => (
+                  <span
+                    key={t}
+                    style={{
+                      fontSize: '0.85rem',
+                      padding: '0.15rem 0.45rem',
+                      borderRadius: 6,
+                      background: 'var(--surface)',
+                      border: '1px solid var(--border)',
+                    }}
+                  >
+                    {t}
+                  </span>
+                ))}
+              </div>
+            </div>
+          ) : null}
           {root.itemCount > 0 ? (
             <div>
               <div style={{ fontSize: '0.7rem', color: 'var(--muted)', textTransform: 'uppercase' }}>
@@ -351,14 +375,6 @@ export default function Course() {
                 Added date
               </div>
               <div>{meta.addedAt}</div>
-            </div>
-          ) : null}
-          {meta?.language ? (
-            <div>
-              <div style={{ fontSize: '0.7rem', color: 'var(--muted)', textTransform: 'uppercase' }}>
-                Language
-              </div>
-              <div>{meta.language}</div>
             </div>
           ) : null}
         </div>

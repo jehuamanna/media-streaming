@@ -16,12 +16,19 @@ type TranscodeStatus = {
   currentFileId?: string | null;
 };
 
-type VisItem = { id: string; title: string; hidden: boolean };
-type VisPlaylist = { id: string; name: string; hidden: boolean; items: VisItem[] };
+type VisItem = { id: string; title: string; hidden: boolean; globalHidden?: boolean };
+type VisPlaylist = {
+  id: string;
+  name: string;
+  hidden: boolean;
+  globalHidden?: boolean;
+  items: VisItem[];
+};
 type VisRoot = {
   id: string;
   name: string;
   hidden: boolean;
+  globalHidden?: boolean;
   playlists: VisPlaylist[];
   pdfs: VisItem[];
 };
@@ -43,11 +50,14 @@ export default function AdminUsers() {
   const [visRoots, setVisRoots] = useState<VisRoot[] | null>(null);
   const [visLoading, setVisLoading] = useState(false);
   const [visSaving, setVisSaving] = useState(false);
+  const [visForUserId, setVisForUserId] = useState('');
+  const [selectedVisRootId, setSelectedVisRootId] = useState<string | null>(null);
   const [metaRootId, setMetaRootId] = useState('');
   const [metaCategory, setMetaCategory] = useState('');
   const [metaCategoryUrl, setMetaCategoryUrl] = useState('');
   const [metaAddedAt, setMetaAddedAt] = useState('');
-  const [metaLanguage, setMetaLanguage] = useState('');
+  const [metaTags, setMetaTags] = useState<string[]>([]);
+  const [metaTagDraft, setMetaTagDraft] = useState('');
   const [metaDescription, setMetaDescription] = useState('');
   const [metaLoading, setMetaLoading] = useState(false);
   const [metaMsg, setMetaMsg] = useState('');
@@ -61,14 +71,15 @@ export default function AdminUsers() {
     setVisLoading(true);
     setError('');
     try {
-      const r = await api<{ roots: VisRoot[] }>('/api/admin/library-visibility');
+      const qs = visForUserId ? `?forUser=${encodeURIComponent(visForUserId)}` : '';
+      const r = await api<{ roots: VisRoot[] }>(`/api/admin/library-visibility${qs}`);
       setVisRoots(r.roots);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed');
     } finally {
       setVisLoading(false);
     }
-  }, []);
+  }, [visForUserId]);
 
   useEffect(() => {
     void loadUsers().catch((e) => setError(e instanceof Error ? e.message : 'Failed'));
@@ -107,6 +118,16 @@ export default function AdminUsers() {
   }, [visRoots, metaRootId]);
 
   useEffect(() => {
+    if (!visRoots?.length) {
+      setSelectedVisRootId(null);
+      return;
+    }
+    setSelectedVisRootId((prev) =>
+      prev && visRoots.some((r) => r.id === prev) ? prev : visRoots[0].id,
+    );
+  }, [visRoots]);
+
+  useEffect(() => {
     if (mainTab !== 'manage' || manageSub !== 'details' || !metaRootId) return;
     setMetaLoading(true);
     setMetaMsg('');
@@ -115,14 +136,15 @@ export default function AdminUsers() {
       category: string;
       categoryUrl: string;
       addedAt: string;
-      language: string;
       descriptionMarkdown: string;
+      tags: string[];
     }>(`/api/admin/course-metadata/${encodeURIComponent(metaRootId)}`)
       .then((m) => {
         setMetaCategory(m.category || '');
         setMetaCategoryUrl(m.categoryUrl || '');
         setMetaAddedAt(m.addedAt || '');
-        setMetaLanguage(m.language || '');
+        setMetaTags(Array.isArray(m.tags) ? m.tags : []);
+        setMetaTagDraft('');
         setMetaDescription(m.descriptionMarkdown || '');
       })
       .catch((e) => setMetaMsg(e instanceof Error ? e.message : 'Failed'))
@@ -264,9 +286,16 @@ export default function AdminUsers() {
           if (p.hidden) hiddenVideos.push(p.id);
         }
       }
+      const forUser =
+        visForUserId.trim() !== '' ? parseInt(visForUserId, 10) : NaN;
       await api('/api/admin/library-visibility', {
         method: 'PUT',
-        json: { hiddenCourses, hiddenPlaylists, hiddenVideos },
+        json: {
+          hiddenCourses,
+          hiddenPlaylists,
+          hiddenVideos,
+          ...(Number.isFinite(forUser) && forUser > 0 ? { forUser } : {}),
+        },
       });
       await loadVisibility();
     } catch (e) {
@@ -274,6 +303,21 @@ export default function AdminUsers() {
     } finally {
       setVisSaving(false);
     }
+  }
+
+  function addMetaTag() {
+    const s = metaTagDraft.trim();
+    if (!s) return;
+    setMetaTags((prev) => {
+      if (prev.some((t) => t.toLowerCase() === s.toLowerCase())) return prev;
+      if (prev.length >= 50) return prev;
+      return [...prev, s];
+    });
+    setMetaTagDraft('');
+  }
+
+  function removeMetaTag(tag: string) {
+    setMetaTags((prev) => prev.filter((t) => t !== tag));
   }
 
   async function saveMetadata() {
@@ -287,8 +331,8 @@ export default function AdminUsers() {
           category: metaCategory || null,
           categoryUrl: metaCategoryUrl || null,
           addedAt: metaAddedAt || null,
-          language: metaLanguage || null,
           descriptionMarkdown: metaDescription || null,
+          tags: metaTags,
         },
       });
       setMetaMsg('Saved.');
@@ -430,67 +474,189 @@ export default function AdminUsers() {
           {manageSub === 'visibility' ? (
             <section className="form-panel">
               <h2 style={{ marginTop: 0 }}>Show / hide in library</h2>
+              <label htmlFor="vis-user">Visibility applies to</label>
+              <select
+                id="vis-user"
+                value={visForUserId}
+                onChange={(e) => setVisForUserId(e.target.value)}
+                style={{ width: '100%', maxWidth: '24rem', marginBottom: '0.75rem', padding: '0.5rem' }}
+              >
+                <option value="">All users (default)</option>
+                {users.map((u) => (
+                  <option key={u.id} value={String(u.id)}>
+                    {u.username}
+                  </option>
+                ))}
+              </select>
               <p style={{ color: 'var(--muted)', marginTop: 0 }}>
-                Uncheck to hide a course, playlist, video, or PDF from learners.
+                {visForUserId
+                  ? 'Per-user hides add on top of global visibility. Checkboxes locked by global rules cannot be shown for this user alone.'
+                  : 'Select a course on the left, then adjust playlists, videos, and PDFs in the scrollable panel on the right. Uncheck to hide from learners.'}
               </p>
               {visLoading ? <p>Loading…</p> : null}
-              {visRoots?.map((r) => (
-                <div key={r.id} style={{ marginBottom: '1.25rem', borderBottom: '1px solid var(--border)' }}>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: 700 }}>
-                    <input
-                      type="checkbox"
-                      checked={!r.hidden}
-                      onChange={() => toggleRootHidden(r.id)}
-                    />
-                    Course: {r.name}
-                  </label>
-                  {r.playlists.map((pl) => (
-                    <div key={pl.id} style={{ marginLeft: '1rem', marginTop: '0.5rem' }}>
-                      <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                        <input
-                          type="checkbox"
-                          checked={!pl.hidden}
-                          onChange={() => togglePlHidden(r.id, pl.id)}
-                        />
-                        Playlist: {pl.name}
-                      </label>
-                      <ul style={{ listStyle: 'none', paddingLeft: '1rem', margin: '0.25rem 0' }}>
-                        {pl.items.map((it) => (
-                          <li key={it.id}>
-                            <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                              <input
-                                type="checkbox"
-                                checked={!it.hidden}
-                                onChange={() => toggleItemHidden(r.id, pl.id, it.id)}
-                              />
-                              {it.title}
-                            </label>
-                          </li>
-                        ))}
-                      </ul>
+              <div
+                style={{
+                  display: 'flex',
+                  flexDirection: 'row',
+                  flexWrap: 'wrap',
+                  gap: '1rem',
+                  alignItems: 'stretch',
+                  minHeight: 'min(70vh, 32rem)',
+                  marginBottom: '1rem',
+                }}
+              >
+                <div
+                  style={{
+                    flex: '0 0 14rem',
+                    minWidth: '12rem',
+                    border: '1px solid var(--border)',
+                    borderRadius: '6px',
+                    padding: '0.5rem',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '0.15rem',
+                    maxHeight: '70vh',
+                    overflowY: 'auto',
+                  }}
+                >
+                  {visRoots?.map((r) => (
+                    <div
+                      key={r.id}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'flex-start',
+                        gap: '0.5rem',
+                        padding: '0.35rem 0.25rem',
+                        borderRadius: '4px',
+                        background:
+                          selectedVisRootId === r.id ? 'color-mix(in srgb, var(--border) 35%, transparent)' : undefined,
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={!r.hidden}
+                        disabled={!!r.globalHidden}
+                        title={r.globalHidden ? 'Hidden for all users (change under All users)' : undefined}
+                        onChange={() => {
+                          if (r.globalHidden) return;
+                          toggleRootHidden(r.id);
+                        }}
+                        style={{ marginTop: '0.2rem' }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setSelectedVisRootId(r.id)}
+                        style={{
+                          flex: 1,
+                          textAlign: 'left',
+                          background: 'none',
+                          border: 'none',
+                          color: 'inherit',
+                          cursor: 'pointer',
+                          fontWeight: selectedVisRootId === r.id ? 700 : 400,
+                          padding: 0,
+                        }}
+                      >
+                        {r.name}
+                      </button>
                     </div>
                   ))}
-                  {r.pdfs.length > 0 ? (
-                    <div style={{ marginLeft: '1rem', marginTop: '0.5rem' }}>
-                      <div style={{ fontWeight: 600 }}>PDFs</div>
-                      <ul style={{ listStyle: 'none', paddingLeft: '0.5rem' }}>
-                        {r.pdfs.map((p) => (
-                          <li key={p.id}>
+                </div>
+                <div
+                  style={{
+                    flex: '1 1 18rem',
+                    minWidth: 0,
+                    minHeight: '12rem',
+                    border: '1px solid var(--border)',
+                    borderRadius: '6px',
+                    padding: '0.75rem',
+                    overflowY: 'auto',
+                    maxHeight: '70vh',
+                  }}
+                >
+                  {(() => {
+                    const r = visRoots?.find((x) => x.id === selectedVisRootId);
+                    if (!r) {
+                      return <p style={{ color: 'var(--muted)', margin: 0 }}>Select a course.</p>;
+                    }
+                    return (
+                      <>
+                        <div style={{ fontWeight: 700, marginBottom: '0.75rem' }}>{r.name}</div>
+                        {r.playlists.map((pl) => (
+                          <div key={pl.id} style={{ marginBottom: '1rem' }}>
                             <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                               <input
                                 type="checkbox"
-                                checked={!p.hidden}
-                                onChange={() => togglePdfHidden(r.id, p.id)}
+                                checked={!pl.hidden}
+                                disabled={!!pl.globalHidden}
+                                title={
+                                  pl.globalHidden ? 'Hidden for all users (change under All users)' : undefined
+                                }
+                                onChange={() => {
+                                  if (pl.globalHidden) return;
+                                  togglePlHidden(r.id, pl.id);
+                                }}
                               />
-                              {p.title}
+                              Playlist: {pl.name}
                             </label>
-                          </li>
+                            <ul style={{ listStyle: 'none', paddingLeft: '1rem', margin: '0.35rem 0 0' }}>
+                              {pl.items.map((it) => (
+                                <li key={it.id}>
+                                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                    <input
+                                      type="checkbox"
+                                      checked={!it.hidden}
+                                      disabled={!!it.globalHidden}
+                                      title={
+                                        it.globalHidden
+                                          ? 'Hidden for all users (change under All users)'
+                                          : undefined
+                                      }
+                                      onChange={() => {
+                                        if (it.globalHidden) return;
+                                        toggleItemHidden(r.id, pl.id, it.id);
+                                      }}
+                                    />
+                                    {it.title}
+                                  </label>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
                         ))}
-                      </ul>
-                    </div>
-                  ) : null}
+                        {r.pdfs.length > 0 ? (
+                          <div style={{ marginTop: '0.5rem' }}>
+                            <div style={{ fontWeight: 600, marginBottom: '0.35rem' }}>PDFs</div>
+                            <ul style={{ listStyle: 'none', paddingLeft: '0.5rem', margin: 0 }}>
+                              {r.pdfs.map((p) => (
+                                <li key={p.id}>
+                                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                    <input
+                                      type="checkbox"
+                                      checked={!p.hidden}
+                                      disabled={!!p.globalHidden}
+                                      title={
+                                        p.globalHidden
+                                          ? 'Hidden for all users (change under All users)'
+                                          : undefined
+                                      }
+                                      onChange={() => {
+                                        if (p.globalHidden) return;
+                                        togglePdfHidden(r.id, p.id);
+                                      }}
+                                    />
+                                    {p.title}
+                                  </label>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        ) : null}
+                      </>
+                    );
+                  })()}
                 </div>
-              ))}
+              </div>
               <button
                 type="button"
                 className="btn btn-primary"
@@ -530,8 +696,56 @@ export default function AdminUsers() {
               <input id="catu" value={metaCategoryUrl} onChange={(e) => setMetaCategoryUrl(e.target.value)} />
               <label htmlFor="add">Added date (ISO or text)</label>
               <input id="add" value={metaAddedAt} onChange={(e) => setMetaAddedAt(e.target.value)} />
-              <label htmlFor="lang">Language</label>
-              <input id="lang" value={metaLanguage} onChange={(e) => setMetaLanguage(e.target.value)} />
+              <label htmlFor="tagdraft">Tags</label>
+              <p style={{ color: 'var(--muted)', fontSize: '0.85rem', margin: '0 0 0.5rem' }}>
+                Add labels for filtering and search (max 50 tags, 64 characters each).
+              </p>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem', marginBottom: '0.5rem' }}>
+                {metaTags.map((t) => (
+                  <span
+                    key={t}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '0.35rem',
+                      padding: '0.2rem 0.5rem',
+                      borderRadius: 6,
+                      background: 'var(--surface)',
+                      border: '1px solid var(--border)',
+                      fontSize: '0.9rem',
+                    }}
+                  >
+                    {t}
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      style={{ padding: '0 0.2rem', minHeight: 0, fontSize: '1rem', lineHeight: 1 }}
+                      onClick={() => removeMetaTag(t)}
+                      aria-label={`Remove tag ${t}`}
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+              </div>
+              <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '1rem' }}>
+                <input
+                  id="tagdraft"
+                  value={metaTagDraft}
+                  onChange={(e) => setMetaTagDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      addMetaTag();
+                    }
+                  }}
+                  placeholder="New tag"
+                  style={{ flex: '1 1 12rem', minWidth: '8rem' }}
+                />
+                <button type="button" className="btn btn-ghost" onClick={addMetaTag}>
+                  Add tag
+                </button>
+              </div>
               <label htmlFor="desc">Description (Markdown)</label>
               <textarea
                 id="desc"

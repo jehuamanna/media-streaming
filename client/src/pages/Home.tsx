@@ -3,7 +3,14 @@ import { Link } from 'react-router-dom';
 import { api } from '../api';
 import { useAuth } from '../auth';
 
-type Root = { id: string; name: string; itemCount: number; pdfCount?: number; courseKind?: string };
+type Root = {
+  id: string;
+  name: string;
+  itemCount: number;
+  pdfCount?: number;
+  courseKind?: string;
+  courseMeta?: { tags?: string[] } | null;
+};
 
 type ProgressRow = {
   fileId: string;
@@ -78,9 +85,36 @@ export default function Home() {
         </section>
       ) : null}
       <div className="card-grid">
-        {roots.map((r) => (
+        {roots.map((r) => {
+          const tags = r.courseMeta?.tags?.filter(Boolean) ?? [];
+          return (
           <Link key={r.id} className="tile" to={`/course/${encodeURIComponent(r.id)}`}>
             <strong>{r.name}</strong>
+            {tags.length > 0 ? (
+              <div
+                style={{
+                  display: 'flex',
+                  flexWrap: 'wrap',
+                  gap: '0.25rem',
+                  marginTop: '0.4rem',
+                }}
+              >
+                {tags.map((t) => (
+                  <span
+                    key={t}
+                    style={{
+                      fontSize: '0.72rem',
+                      padding: '0.08rem 0.35rem',
+                      borderRadius: 4,
+                      background: 'color-mix(in srgb, var(--border) 40%, transparent)',
+                      color: 'var(--muted)',
+                    }}
+                  >
+                    {t}
+                  </span>
+                ))}
+              </div>
+            ) : null}
             <div className="count">
               {r.itemCount > 0 ? (
                 <>
@@ -96,7 +130,8 @@ export default function Home() {
               {r.itemCount === 0 && (r.pdfCount ?? 0) === 0 ? 'Course' : null}
             </div>
           </Link>
-        ))}
+          );
+        })}
       </div>
       {!error && roots.length === 0 ? (
         <p style={{ color: 'var(--muted)' }}>

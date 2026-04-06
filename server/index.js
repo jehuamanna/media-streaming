@@ -661,13 +661,33 @@ function initDb() {
       category_url TEXT,
       added_at TEXT,
       language TEXT,
-      description_markdown TEXT
+      description_markdown TEXT,
+      tags TEXT
     );
     CREATE TABLE IF NOT EXISTS media_duration (
       file_id TEXT PRIMARY KEY,
       duration_seconds REAL NOT NULL,
       source_mtime_ms REAL NOT NULL,
       updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS library_user_hidden_course (
+      user_id INTEGER NOT NULL,
+      root_id TEXT NOT NULL,
+      PRIMARY KEY (user_id, root_id),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS library_user_hidden_playlist (
+      user_id INTEGER NOT NULL,
+      root_id TEXT NOT NULL,
+      playlist_id TEXT NOT NULL,
+      PRIMARY KEY (user_id, root_id, playlist_id),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS library_user_hidden_video (
+      user_id INTEGER NOT NULL,
+      file_id TEXT NOT NULL,
+      PRIMARY KEY (user_id, file_id),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
   `);
 
@@ -686,6 +706,11 @@ function initDb() {
     console.log('[db] Created bootstrap admin user (must change password on first login).');
   }
 
+  const courseMetaCols = db.prepare(`PRAGMA table_info(course_metadata)`).all();
+  if (!courseMetaCols.some((c) => c.name === 'tags')) {
+    db.exec(`ALTER TABLE course_metadata ADD COLUMN tags TEXT`);
+  }
+
   return db;
 }
 
@@ -695,6 +720,32 @@ if (!JWT_SECRET || JWT_SECRET.length < 16) {
 }
 
 const db = initDb();
+
+function normalizeCourseTagsInput(input) {
+  if (!Array.isArray(input)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const x of input) {
+    const s = String(x).trim();
+    if (!s || s.length > 64) continue;
+    const k = s.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(s);
+    if (out.length >= 50) break;
+  }
+  return out;
+}
+
+function parseCourseTagsColumn(raw) {
+  if (raw == null || raw === '') return [];
+  try {
+    const v = JSON.parse(raw);
+    return normalizeCourseTagsInput(v);
+  } catch {
+    return [];
+  }
+}
 
 function loadVisibilityState() {
   const hiddenCourses = new Set(
@@ -709,6 +760,49 @@ function loadVisibilityState() {
     db.prepare('SELECT file_id FROM library_hidden_video').all().map((r) => r.file_id),
   );
   return { hiddenCourses, hiddenPlaylists, hiddenVideos };
+}
+
+function loadUserVisibilityState(userId) {
+  const hiddenCourses = new Set(
+    db
+      .prepare('SELECT root_id FROM library_user_hidden_course WHERE user_id = ?')
+      .all(userId)
+      .map((r) => r.root_id),
+  );
+  const hiddenPlaylists = new Map();
+  for (const row of db
+    .prepare(
+      'SELECT root_id, playlist_id FROM library_user_hidden_playlist WHERE user_id = ?',
+    )
+    .all(userId)) {
+    if (!hiddenPlaylists.has(row.root_id)) hiddenPlaylists.set(row.root_id, new Set());
+    hiddenPlaylists.get(row.root_id).add(row.playlist_id);
+  }
+  const hiddenVideos = new Set(
+    db
+      .prepare('SELECT file_id FROM library_user_hidden_video WHERE user_id = ?')
+      .all(userId)
+      .map((r) => r.file_id),
+  );
+  return { hiddenCourses, hiddenPlaylists, hiddenVideos };
+}
+
+function mergeVisibility(globalVis, userVis) {
+  const hiddenCourses = new Set([...globalVis.hiddenCourses, ...userVis.hiddenCourses]);
+  const hiddenVideos = new Set([...globalVis.hiddenVideos, ...userVis.hiddenVideos]);
+  const hiddenPlaylists = new Map(globalVis.hiddenPlaylists);
+  for (const [rootId, plSet] of userVis.hiddenPlaylists) {
+    if (!hiddenPlaylists.has(rootId)) hiddenPlaylists.set(rootId, new Set());
+    for (const pl of plSet) hiddenPlaylists.get(rootId).add(pl);
+  }
+  return { hiddenCourses, hiddenPlaylists, hiddenVideos };
+}
+
+function loadMergedVisibilityForUser(userId) {
+  const g = loadVisibilityState();
+  if (!userId) return g;
+  const u = loadUserVisibilityState(userId);
+  return mergeVisibility(g, u);
 }
 
 function playlistHiddenForRoot(vis, rootId, playlistId) {
@@ -754,8 +848,8 @@ function enrichRootForLibrary(root) {
         category: row.category || null,
         categoryUrl: row.category_url || null,
         addedAt: row.added_at || null,
-        language: row.language || null,
         descriptionMarkdown: row.description_markdown || null,
+        tags: parseCourseTagsColumn(row.tags),
       }
     : null;
   const videoIds = [];
@@ -805,19 +899,29 @@ function slugifyDownloadName(name) {
   return s || 'course';
 }
 
-function isDocumentVisibleToLearner(fileId) {
+function isDocumentVisibleToLearner(fileId, userId) {
   const meta = getFileMeta(fileId);
   if (!meta || meta.kind !== 'pdf') return false;
-  const vis = loadVisibilityState();
+  const vis = loadMergedVisibilityForUser(userId);
   if (vis.hiddenCourses.has(meta.rootId)) return false;
   if (playlistHiddenForRoot(vis, meta.rootId, meta.playlistId)) return false;
   if (vis.hiddenVideos.has(fileId)) return false;
   return true;
 }
 
-function isCourseMaterialsAllowed(rootId) {
-  const vis = loadVisibilityState();
+function isCourseMaterialsAllowed(rootId, userId) {
+  const vis = loadMergedVisibilityForUser(userId);
   return !vis.hiddenCourses.has(rootId) && fs.existsSync(path.join(VIDEOS_DIR, rootId));
+}
+
+function isMediaFileVisibleToLearner(fileId, userId) {
+  const meta = getFileMeta(fileId);
+  if (!meta || (meta.kind !== 'pdf' && meta.kind !== 'video')) return false;
+  const vis = loadMergedVisibilityForUser(userId);
+  if (vis.hiddenCourses.has(meta.rootId)) return false;
+  if (playlistHiddenForRoot(vis, meta.rootId, meta.playlistId)) return false;
+  if (vis.hiddenVideos.has(fileId)) return false;
+  return true;
 }
 
 function ffprobeDurationSeconds(absPath) {
@@ -854,10 +958,13 @@ function ffprobeDurationSeconds(absPath) {
 function buildSearchIndex(roots) {
   const entries = [];
   for (const root of roots) {
+    const tagPart = Array.isArray(root.courseMeta?.tags)
+      ? root.courseMeta.tags.join(' ')
+      : '';
     entries.push({
       type: 'course',
       label: root.name,
-      path: root.name,
+      path: [root.name, tagPart].filter(Boolean).join(' '),
       rootId: root.id,
       fileId: null,
       playlistId: null,
@@ -992,7 +1099,7 @@ app.get('/api/library', authMiddleware(true), (req, res) => {
   libraryCache = { at: 0, data: null, fileMap: new Map() };
   getLibrary();
   const roots = libraryCache.data.roots;
-  const vis = loadVisibilityState();
+  const vis = loadMergedVisibilityForUser(req.user.id);
   const filtered = filterRootsForLearner(roots, vis);
   res.json({ roots: filtered.map(enrichRootForLibrary) });
 });
@@ -1003,8 +1110,8 @@ app.get('/api/search', authMiddleware(true), (req, res) => {
   if (q.length < 1) return res.json({ results: [] });
   libraryCache = { at: 0, data: null, fileMap: new Map() };
   getLibrary();
-  const vis = loadVisibilityState();
-  const roots = filterRootsForLearner(libraryCache.data.roots, vis);
+  const vis = loadMergedVisibilityForUser(req.user.id);
+  const roots = filterRootsForLearner(libraryCache.data.roots, vis).map(enrichRootForLibrary);
   const idx = buildSearchIndex(roots);
   const fuse = new Fuse(idx, { keys: ['label', 'path'], threshold: 0.42, ignoreLocation: true });
   const hits = fuse.search(q, { limit }).map((h) => h.item);
@@ -1016,12 +1123,15 @@ app.get('/api/similar-courses', authMiddleware(true), (req, res) => {
   const limit = Math.min(20, Math.max(1, parseInt(String(req.query.limit || '8'), 10) || 8));
   libraryCache = { at: 0, data: null, fileMap: new Map() };
   getLibrary();
-  const vis = loadVisibilityState();
+  const vis = loadMergedVisibilityForUser(req.user.id);
   const enriched = filterRootsForLearner(libraryCache.data.roots, vis).map(enrichRootForLibrary);
   const current = enriched.find((r) => r.id === rootId);
   if (!current) return res.json({ courses: [] });
   const others = enriched.filter((r) => r.id !== rootId);
   const cat = (current.courseMeta?.category || '').trim().toLowerCase();
+  const curTagSet = new Set(
+    (current.courseMeta?.tags || []).map((t) => String(t).trim().toLowerCase()).filter(Boolean),
+  );
   const fuse = new Fuse(others, { keys: ['name'], threshold: 0.52, includeScore: true });
   const nameResults = fuse.search(current.name, { limit: 40 });
   const byId = new Map();
@@ -1029,6 +1139,10 @@ app.get('/api/similar-courses', authMiddleware(true), (req, res) => {
     let score = 0;
     const ocat = (o.courseMeta?.category || '').trim().toLowerCase();
     if (cat && ocat && cat === ocat) score += 1000;
+    for (const t of o.courseMeta?.tags || []) {
+      const k = String(t).trim().toLowerCase();
+      if (k && curTagSet.has(k)) score += 200;
+    }
     byId.set(o.id, { o, score });
   }
   for (const fr of nameResults) {
@@ -1054,7 +1168,7 @@ app.get('/api/similar-courses', authMiddleware(true), (req, res) => {
 app.get('/api/documents/:fileId', authMiddleware(true), (req, res) => {
   const fileId = String(req.params.fileId || '');
   if (!/^[0-9a-f]{32}$/.test(fileId)) return res.status(400).end();
-  if (!isDocumentVisibleToLearner(fileId)) return res.status(403).end();
+  if (!isDocumentVisibleToLearner(fileId, req.user.id)) return res.status(403).end();
   const meta = getFileMeta(fileId);
   if (!meta || meta.kind !== 'pdf') return res.status(404).end();
   res.setHeader('Content-Type', 'application/pdf');
@@ -1067,7 +1181,7 @@ app.get('/api/course/:rootId/materials.zip', authMiddleware(true), (req, res) =>
   if (rootId.includes('..') || rootId.includes('/') || rootId.includes('\\')) {
     return res.status(400).end();
   }
-  if (!isCourseMaterialsAllowed(rootId)) return res.status(404).end();
+  if (!isCourseMaterialsAllowed(rootId, req.user.id)) return res.status(404).end();
   const base = path.resolve(path.join(VIDEOS_DIR, rootId));
   const rootResolved = path.resolve(VIDEOS_DIR);
   if (!base.startsWith(rootResolved + path.sep) && base !== rootResolved) return res.status(400).end();
@@ -1306,32 +1420,93 @@ app.get('/api/admin/library-visibility', authMiddleware(true), requireAdmin, (re
   libraryCache = { at: 0, data: null, fileMap: new Map() };
   getLibrary();
   const roots = libraryCache.data.roots;
-  const vis = loadVisibilityState();
+  const forUserRaw = req.query.forUser;
+  const forUserId =
+    forUserRaw != null && String(forUserRaw).trim() !== ''
+      ? parseInt(String(forUserRaw), 10)
+      : NaN;
+  const g = loadVisibilityState();
+  const perUser = Number.isFinite(forUserId) && forUserId > 0;
+  const m = perUser ? mergeVisibility(g, loadUserVisibilityState(forUserId)) : g;
+
   const body = roots.map((root) => ({
     id: root.id,
     name: root.name,
-    hidden: vis.hiddenCourses.has(root.id),
+    hidden: m.hiddenCourses.has(root.id),
+    globalHidden: perUser ? g.hiddenCourses.has(root.id) : undefined,
     playlists: root.playlists.map((pl) => ({
       id: pl.id,
       name: pl.name,
-      hidden: playlistHiddenForRoot(vis, root.id, pl.id),
+      hidden: playlistHiddenForRoot(m, root.id, pl.id),
+      globalHidden: perUser ? playlistHiddenForRoot(g, root.id, pl.id) : undefined,
       items: pl.items.map((it) => ({
         id: it.id,
         title: it.title,
-        hidden: vis.hiddenVideos.has(it.id),
+        hidden: m.hiddenVideos.has(it.id),
+        globalHidden: perUser ? g.hiddenVideos.has(it.id) : undefined,
       })),
     })),
     pdfs: (root.pdfs || []).map((p) => ({
       id: p.id,
       title: p.title,
-      hidden: vis.hiddenVideos.has(p.id),
+      hidden: m.hiddenVideos.has(p.id),
+      globalHidden: perUser ? g.hiddenVideos.has(p.id) : undefined,
     })),
   }));
-  res.json({ roots: body });
+  res.json({ roots: body, scope: perUser ? 'user' : 'global', forUserId: perUser ? forUserId : null });
 });
 
 app.put('/api/admin/library-visibility', authMiddleware(true), requireAdmin, (req, res) => {
-  const { hiddenCourses = [], hiddenPlaylists = [], hiddenVideos = [] } = req.body || {};
+  const {
+    hiddenCourses = [],
+    hiddenPlaylists = [],
+    hiddenVideos = [],
+    forUser: forUserBody,
+  } = req.body || {};
+  const forUserId =
+    forUserBody != null && forUserBody !== '' ? parseInt(String(forUserBody), 10) : NaN;
+  const perUser = Number.isFinite(forUserId) && forUserId > 0;
+
+  if (perUser) {
+    const urow = db.prepare('SELECT id FROM users WHERE id = ?').get(forUserId);
+    if (!urow) {
+      return res.status(400).json({ error: 'Invalid forUser' });
+    }
+    const g = loadVisibilityState();
+    const userCourses = hiddenCourses
+      .map((id) => String(id))
+      .filter((id) => !g.hiddenCourses.has(id));
+    const userPl = [];
+    for (const x of hiddenPlaylists) {
+      if (x?.rootId == null || x?.playlistId == null) continue;
+      const rootId = String(x.rootId);
+      const playlistId = String(x.playlistId);
+      if (!playlistHiddenForRoot(g, rootId, playlistId)) {
+        userPl.push({ rootId, playlistId });
+      }
+    }
+    const userVids = hiddenVideos.map((id) => String(id)).filter((id) => !g.hiddenVideos.has(id));
+    const tx = db.transaction(() => {
+      db.prepare('DELETE FROM library_user_hidden_course WHERE user_id = ?').run(forUserId);
+      db.prepare('DELETE FROM library_user_hidden_playlist WHERE user_id = ?').run(forUserId);
+      db.prepare('DELETE FROM library_user_hidden_video WHERE user_id = ?').run(forUserId);
+      const insC = db.prepare(
+        'INSERT INTO library_user_hidden_course (user_id, root_id) VALUES (?, ?)',
+      );
+      const insP = db.prepare(
+        'INSERT INTO library_user_hidden_playlist (user_id, root_id, playlist_id) VALUES (?, ?, ?)',
+      );
+      const insV = db.prepare(
+        'INSERT INTO library_user_hidden_video (user_id, file_id) VALUES (?, ?)',
+      );
+      for (const id of userCourses) insC.run(forUserId, id);
+      for (const x of userPl) insP.run(forUserId, x.rootId, x.playlistId);
+      for (const id of userVids) insV.run(forUserId, id);
+    });
+    tx();
+    return res.json({ ok: true });
+  }
+
   const tx = db.transaction(() => {
     db.prepare('DELETE FROM library_hidden_course').run();
     db.prepare('DELETE FROM library_hidden_playlist').run();
@@ -1362,8 +1537,8 @@ app.get('/api/admin/course-metadata/:rootId', authMiddleware(true), requireAdmin
       category: '',
       categoryUrl: '',
       addedAt: '',
-      language: '',
       descriptionMarkdown: '',
+      tags: [],
     });
   }
   res.json({
@@ -1371,30 +1546,32 @@ app.get('/api/admin/course-metadata/:rootId', authMiddleware(true), requireAdmin
     category: row.category || '',
     categoryUrl: row.category_url || '',
     addedAt: row.added_at || '',
-    language: row.language || '',
     descriptionMarkdown: row.description_markdown || '',
+    tags: parseCourseTagsColumn(row.tags),
   });
 });
 
 app.put('/api/admin/course-metadata/:rootId', authMiddleware(true), requireAdmin, (req, res) => {
   const rootId = decodeURIComponent(req.params.rootId);
-  const { category, categoryUrl, addedAt, language, descriptionMarkdown } = req.body || {};
+  const { category, categoryUrl, addedAt, descriptionMarkdown, tags } = req.body || {};
+  const tagsNorm = normalizeCourseTagsInput(tags);
+  const tagsJson = tagsNorm.length > 0 ? JSON.stringify(tagsNorm) : null;
   db.prepare(
-    `INSERT INTO course_metadata (root_id, category, category_url, added_at, language, description_markdown)
+    `INSERT INTO course_metadata (root_id, category, category_url, added_at, description_markdown, tags)
      VALUES (?, ?, ?, ?, ?, ?)
      ON CONFLICT(root_id) DO UPDATE SET
        category = excluded.category,
        category_url = excluded.category_url,
        added_at = excluded.added_at,
-       language = excluded.language,
-       description_markdown = excluded.description_markdown`,
+       description_markdown = excluded.description_markdown,
+       tags = excluded.tags`,
   ).run(
     rootId,
     category ?? null,
     categoryUrl ?? null,
     addedAt ?? null,
-    language ?? null,
     descriptionMarkdown ?? null,
+    tagsJson,
   );
   res.json({ ok: true });
 });
@@ -1444,6 +1621,9 @@ app.get('/api/vod/playable/:fileId', authMiddleware(true), (req, res) => {
   if (!getFileMeta(fileId)) {
     return res.status(404).json({ error: 'Not found' });
   }
+  if (!isMediaFileVisibleToLearner(fileId, req.user.id)) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
   if (isVodHlsPlayable(fileId)) {
     return res.json({ playable: true });
   }
@@ -1460,6 +1640,9 @@ async function vodEnsureHandler(req, res, next) {
   }
   const fileId = m[1];
   try {
+    if (!isMediaFileVisibleToLearner(fileId, req.user.id)) {
+      return res.status(403).end();
+    }
     if (m[2] === 'index.m3u8') {
       if (!getFileMeta(fileId)) {
         return res.status(404).end();
