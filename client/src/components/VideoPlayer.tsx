@@ -50,12 +50,20 @@ function isVodHlsSrc(s: string) {
   return s.includes('/hls/vod/');
 }
 
+type VodPlayableResponse = {
+  playable: boolean;
+  pending?: boolean;
+  error?: string;
+  errorCode?: string;
+};
+
 /** Warm HTTP cache: manifest + enough `.ts` segments to cover ~`secondsWanted` of media. */
 async function prefetchVodSegments(hlsUrl: string, fileId: string, secondsWanted: number) {
   try {
     for (let i = 0; i < 24; i++) {
-      const r = await api<{ playable: boolean }>(`/api/vod/playable/${encodeURIComponent(fileId)}`);
+      const r = await api<VodPlayableResponse>(`/api/vod/playable/${encodeURIComponent(fileId)}`);
       if (r.playable) break;
+      if (r.error) break;
       await new Promise((res) => setTimeout(res, 500));
     }
   } catch {
@@ -95,6 +103,7 @@ export function VideoPlayer({ src, fileId, nextSrc, nextFileId, onEnded }: Props
   const onEndedRef = useRef(onEnded);
   onEndedRef.current = onEnded;
   const [vodPreparing, setVodPreparing] = useState(false);
+  const [vodPrepareError, setVodPrepareError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!videoRef.current) return;
@@ -130,6 +139,7 @@ export function VideoPlayer({ src, fileId, nextSrc, nextFileId, onEnded }: Props
     if (!player) return;
     if (!src) {
       setVodPreparing(false);
+      setVodPrepareError(null);
       try {
         player.pause();
         player.reset();
@@ -143,6 +153,7 @@ export function VideoPlayer({ src, fileId, nextSrc, nextFileId, onEnded }: Props
     const waitVodThenPlay = async () => {
       if (fileId && isVodHlsSrc(src)) {
         setVodPreparing(true);
+        setVodPrepareError(null);
         try {
           player.pause();
           player.reset();
@@ -152,10 +163,23 @@ export function VideoPlayer({ src, fileId, nextSrc, nextFileId, onEnded }: Props
         try {
           for (;;) {
             if (cancelled) return;
-            const r = await api<{ playable: boolean }>(
+            const r = await api<VodPlayableResponse>(
               `/api/vod/playable/${encodeURIComponent(fileId)}`,
             );
             if (r.playable) break;
+            if (r.error) {
+              if (!cancelled) {
+                setVodPrepareError(r.error);
+                setVodPreparing(false);
+              }
+              try {
+                player.pause();
+                player.reset();
+              } catch {
+                /* ignore */
+              }
+              return;
+            }
             await new Promise((r) => setTimeout(r, 1500));
           }
         } catch {
@@ -170,6 +194,7 @@ export function VideoPlayer({ src, fileId, nextSrc, nextFileId, onEnded }: Props
         }
         if (cancelled) return;
         setVodPreparing(false);
+        setVodPrepareError(null);
       }
       ensureVhsAuthAndTimeouts();
       player.src({ src, type: 'application/x-mpegURL' });
@@ -203,6 +228,7 @@ export function VideoPlayer({ src, fileId, nextSrc, nextFileId, onEnded }: Props
     return () => {
       cancelled = true;
       setVodPreparing(false);
+      setVodPrepareError(null);
     };
   }, [src, fileId]);
 
@@ -266,6 +292,10 @@ export function VideoPlayer({ src, fileId, nextSrc, nextFileId, onEnded }: Props
       {!src ? (
         <div className="player-placeholder">
           <span>Select a video</span>
+        </div>
+      ) : vodPrepareError ? (
+        <div className="player-placeholder">
+          <span>Playback failed: {vodPrepareError}</span>
         </div>
       ) : vodPreparing ? (
         <div className="player-placeholder">

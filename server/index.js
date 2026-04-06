@@ -312,6 +312,7 @@ function clearVodHlsCache(fileId) {
       /* ignore */
     }
   }
+  vodEncodeLastError.delete(fileId);
   if (!vodLocks.has(fileId)) {
     vodCancelRequested.delete(fileId);
   }
@@ -351,6 +352,19 @@ function releaseVodTranscodeSlot() {
 const VOD_PLAYABLE_WAIT_MS = Number.parseInt(String(process.env.VOD_PLAYABLE_WAIT_MS || ''), 10) || 1_800_000;
 const VOD_ENCODING_LOCK_STALE_MS =
   Number.parseInt(String(process.env.VOD_ENCODING_LOCK_STALE_MS || ''), 10) || 4 * 60 * 60 * 1000;
+/** After a failed transcode, do not auto-restart this often (playable poll used to spawn ffmpeg every ~1.5s). */
+const VOD_ENCODE_RETRY_COOLDOWN_MS =
+  Number.parseInt(String(process.env.VOD_ENCODE_RETRY_COOLDOWN_MS || ''), 10) || 60_000;
+
+/** fileId -> last ffmpeg failure (surfaced on /api/vod/playable; cleared on success). */
+const vodEncodeLastError = new Map();
+
+function vodTranscodeCooldownActive(fileId) {
+  const e = vodEncodeLastError.get(fileId);
+  return Boolean(
+    e && e.code !== 'CANCELLED' && Date.now() - e.at < VOD_ENCODE_RETRY_COOLDOWN_MS,
+  );
+}
 
 const vodEncodingLockDir = path.join(HLS_VOD_DIR, '.locks');
 
@@ -362,6 +376,17 @@ function vodIndexFresh(indexPath, srcMtime) {
   try {
     const st = fs.statSync(indexPath);
     return st.mtimeMs >= srcMtime;
+  } catch {
+    return false;
+  }
+}
+
+function segmentFileExists(outDir, uriLine) {
+  const t = uriLine.trim();
+  if (!t || t.startsWith('#')) return false;
+  const segPath = path.isAbsolute(t) ? t : path.join(outDir, t);
+  try {
+    return fs.existsSync(segPath) && fs.statSync(segPath).size > 0;
   } catch {
     return false;
   }
@@ -386,14 +411,16 @@ function isVodHlsPlayable(fileId) {
     if (!txt.includes('#EXTINF')) return false;
     const lines = txt.split(/\r?\n/);
     for (const line of lines) {
-      const t = line.trim();
-      if (t && !t.startsWith('#')) {
-        const segPath = path.join(outDir, t);
-        try {
-          if (fs.existsSync(segPath) && fs.statSync(segPath).size > 0) return true;
-        } catch {
-          /* keep scanning */
-        }
+      if (segmentFileExists(outDir, line)) return true;
+    }
+    const names = fs.readdirSync(outDir);
+    for (const name of names) {
+      if (!name.endsWith('.ts')) continue;
+      const p = path.join(outDir, name);
+      try {
+        if (fs.statSync(p).size > 0) return true;
+      } catch {
+        /* keep scanning */
       }
     }
   } catch {
@@ -453,7 +480,7 @@ async function waitForVodFromPeer(fileId, outDir, indexPath, srcMtime) {
     }
     if (!fs.existsSync(lockP)) {
       await new Promise((r) => setTimeout(r, 100));
-      return ensureVodHls(fileId);
+      return ensureVodHls(fileId, { ignoreCooldown: true });
     }
     await new Promise((r) => setTimeout(r, 250));
   }
@@ -534,18 +561,10 @@ function waitForPlayableHls(outDir, ff, timeoutMs) {
         if (!txt.includes('#EXTINF')) return;
         const lines = txt.split(/\r?\n/);
         for (const line of lines) {
-          const t = line.trim();
-          if (t && !t.startsWith('#')) {
-            const segPath = path.join(outDir, t);
-            try {
-              if (fs.existsSync(segPath) && fs.statSync(segPath).size > 0) {
-                clearInterval(iv);
-                resolve();
-                return;
-              }
-            } catch {
-              /* keep polling */
-            }
+          if (segmentFileExists(outDir, line)) {
+            clearInterval(iv);
+            resolve();
+            return;
           }
         }
       } catch {
@@ -576,7 +595,7 @@ function waitForFfmpegClose(ff, stderr) {
   });
 }
 
-function ensureVodHls(fileId) {
+function ensureVodHls(fileId, opts = {}) {
   const meta = getFileMeta(fileId);
   if (!meta) {
     const err = new Error('NOT_FOUND');
@@ -603,10 +622,21 @@ function ensureVodHls(fileId) {
     err.code = 'NOT_FOUND';
     return Promise.reject(err);
   }
-  if (vodIndexFresh(indexPath, srcMtime)) return Promise.resolve(outDir);
+  // Match /api/vod/playable: mtime-only "fresh" index can be empty or missing segments after a crash.
+  if (isVodHlsPlayable(fileId)) {
+    vodEncodeLastError.delete(fileId);
+    return Promise.resolve(outDir);
+  }
 
   const existing = vodLocks.get(fileId);
   if (existing) return existing;
+
+  if (!opts.ignoreCooldown && vodTranscodeCooldownActive(fileId)) {
+    const prev = vodEncodeLastError.get(fileId);
+    const err = new Error(prev?.message || 'Transcode failed; retry later.');
+    err.code = 'ENCODE_COOLDOWN';
+    return Promise.reject(err);
+  }
 
   const releaseEncodingLock = tryAcquireEncodingLock(fileId);
   if (!releaseEncodingLock) {
@@ -659,10 +689,18 @@ function ensureVodHls(fileId) {
         ff.once('error', rej);
       });
       await Promise.race([waitForPlayableHls(outDir, ff, VOD_PLAYABLE_WAIT_MS), spawnOrRunError]);
+      vodEncodeLastError.delete(fileId);
       settleHttp(null, outDir);
 
       await waitForFfmpegClose(ff, stderr);
     } catch (e) {
+      if (e?.code !== 'CANCELLED') {
+        vodEncodeLastError.set(fileId, {
+          message: e?.message || String(e),
+          code: e?.code || 'FAILED',
+          at: Date.now(),
+        });
+      }
       const clientAlreadyHasManifest = httpSettled;
       settleHttp(e);
       if (ff && ff.exitCode === null) {
@@ -1495,7 +1533,7 @@ app.post('/api/admin/transcode-all', authMiddleware(true), requireAdmin, (req, r
         const fileId = fileIds[i];
         transcodeAllJob.currentFileId = fileId;
         try {
-          await ensureVodHls(fileId);
+          await ensureVodHls(fileId, { ignoreCooldown: true });
           transcodeAllJob.done = i + 1;
           console.log(`[transcode-all] ${i + 1}/${fileIds.length} ok ${fileId}`);
         } catch (e) {
@@ -1550,7 +1588,8 @@ app.post('/api/admin/vod/transcode/:fileId', authMiddleware(true), requireAdmin,
   if (!fileId) return res.status(400).json({ error: 'bad_file_id' });
   const m = getFileMeta(fileId);
   if (!m || m.kind === 'pdf') return res.status(404).json({ error: 'not_found' });
-  void ensureVodHls(fileId).catch((e) => {
+  vodEncodeLastError.delete(fileId);
+  void ensureVodHls(fileId, { ignoreCooldown: true }).catch((e) => {
     if (e?.code && e.code !== 'NOT_FOUND' && e.code !== 'CANCELLED')
       console.error('[admin vod transcode]', e);
   });
@@ -1576,7 +1615,7 @@ app.post('/api/admin/vod/transcode-root/:rootId', authMiddleware(true), requireA
   void (async () => {
     for (const id of ids) {
       try {
-        await ensureVodHls(id);
+        await ensureVodHls(id, { ignoreCooldown: true });
       } catch (e) {
         if (e?.code !== 'CANCELLED') console.error(`[transcode-root] ${rootId} ${id}`, e?.message || e);
       }
@@ -1849,12 +1888,23 @@ app.get('/api/vod/playable/:fileId', authMiddleware(true), (req, res) => {
     return res.status(403).json({ error: 'Forbidden' });
   }
   if (isVodHlsPlayable(fileId)) {
+    vodEncodeLastError.delete(fileId);
     return res.json({ playable: true });
   }
-  void ensureVodHls(fileId).catch((e) => {
-    if (e?.code !== 'NOT_FOUND') console.error('[vod]', e);
-  });
-  res.json({ playable: false });
+  const pending = vodLocks.has(fileId);
+  if (!vodTranscodeCooldownActive(fileId)) {
+    void ensureVodHls(fileId).catch((e) => {
+      if (e?.code === 'NOT_FOUND' || e?.code === 'ENCODE_COOLDOWN') return;
+      console.error('[vod]', e);
+    });
+  }
+  const lastErr = vodEncodeLastError.get(fileId);
+  const body = { playable: false, pending };
+  if (lastErr && vodTranscodeCooldownActive(fileId)) {
+    body.error = lastErr.message;
+    body.errorCode = lastErr.code;
+  }
+  res.json(body);
 });
 
 async function vodEnsureHandler(req, res, next) {
@@ -1872,8 +1922,16 @@ async function vodEnsureHandler(req, res, next) {
         return res.status(404).end();
       }
       if (!isVodHlsPlayable(fileId)) {
+        if (vodTranscodeCooldownActive(fileId)) {
+          res.setHeader('Retry-After', '15');
+          return res.status(503).json({
+            error: 'transcode_failed',
+            message: vodEncodeLastError.get(fileId)?.message || 'Transcode failed.',
+          });
+        }
         void ensureVodHls(fileId).catch((e) => {
-          if (e?.code !== 'NOT_FOUND') console.error('[vod]', e);
+          if (e?.code === 'NOT_FOUND' || e?.code === 'ENCODE_COOLDOWN') return;
+          console.error('[vod]', e);
         });
         res.setHeader('Retry-After', '2');
         return res.status(503).json({ error: 'not_ready', message: 'Transcoding in progress.' });
@@ -1885,6 +1943,13 @@ async function vodEnsureHandler(req, res, next) {
   } catch (e) {
     if (e.code === 'NOT_FOUND') {
       return res.status(404).end();
+    }
+    if (e.code === 'ENCODE_COOLDOWN') {
+      res.setHeader('Retry-After', '15');
+      return res.status(503).json({
+        error: 'transcode_failed',
+        message: vodEncodeLastError.get(fileId)?.message || e.message,
+      });
     }
     console.error('[vod]', e);
     return res.status(500).json({ error: 'Transcode failed' });
