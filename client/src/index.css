@@ -398,6 +398,19 @@ button {
   color: var(--text);
 }
 
+/* Checkboxes/radios are not full-width fields; global rules above break flex row layouts (admin visibility, etc.). */
+.form-panel input[type='checkbox'],
+.form-panel input[type='radio'] {
+  width: auto;
+  min-width: 1rem;
+  padding: 0;
+  margin-bottom: 0;
+  margin-top: 0;
+  flex-shrink: 0;
+  align-self: center;
+  vertical-align: middle;
+}
+
 .btn {
   padding: 0.5rem 1rem;
   border-radius: 6px;
