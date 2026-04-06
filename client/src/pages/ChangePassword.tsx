@@ -1,27 +1,29 @@
 import { useState } from 'react';
-import { Navigate } from 'react-router-dom';
+import { Navigate, useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import { useAuth } from '../auth';
 
 export default function ChangePassword() {
   const { user, mustChangePassword, setSession, loading } = useAuth();
+  const navigate = useNavigate();
   const [currentPassword, setCurrent] = useState('');
   const [newPassword, setNew] = useState('');
   const [error, setError] = useState('');
 
   if (loading) return <p className="app-shell">Loading…</p>;
   if (!user) return <Navigate to="/login" replace />;
-  if (!mustChangePassword) return <Navigate to="/" replace />;
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError('');
     try {
+      const voluntary = !mustChangePassword;
       const r = await api<{ token: string; user: { id: number; username: string; role: string }; mustChangePassword: boolean }>(
         '/api/auth/change-password',
         { method: 'POST', json: { currentPassword, newPassword } },
       );
       setSession(r.token, r.user, !!r.mustChangePassword);
+      if (voluntary) navigate('/', { replace: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed');
     }
@@ -31,7 +33,9 @@ export default function ChangePassword() {
     <div className="app-shell">
       <h1>Change password</h1>
       <p style={{ color: 'var(--muted)', maxWidth: 480 }}>
-        You must set a new password before using the library.
+        {mustChangePassword
+          ? 'You must set a new password before using the library.'
+          : 'Enter your current password and a new password (at least 8 characters).'}
       </p>
       <form className="form-panel" onSubmit={onSubmit}>
         {error ? <div className="error">{error}</div> : null}

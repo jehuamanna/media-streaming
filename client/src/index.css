@@ -363,6 +363,55 @@ button {
   min-width: 0;
 }
 
+/* HLS cache + Show/hide in library: resizable two-column row; default ~60% / 40% via React state. */
+.admin-vod-split,
+.admin-vod-split-head {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 0;
+}
+
+.admin-vod-split-head {
+  align-items: baseline;
+  margin-bottom: 0.35rem;
+}
+
+.admin-vod-split-head-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.admin-vod-split-head-spacer {
+  flex: 0 0 6px;
+  flex-shrink: 0;
+}
+
+.admin-vod-split {
+  min-height: min(70vh, 32rem);
+  margin-bottom: 1rem;
+}
+
+.admin-vod-splitter {
+  flex: 0 0 6px;
+  flex-shrink: 0;
+  align-self: stretch;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+  background: color-mix(in srgb, var(--border) 55%, transparent);
+  border-radius: 2px;
+}
+
+.admin-vod-splitter:hover,
+.admin-vod-splitter:focus-visible {
+  outline: none;
+  background: color-mix(in srgb, var(--border) 25%, var(--text));
+}
+
 @media (max-width: 640px) {
   .admin-two-pane-head {
     flex-direction: column;
@@ -378,6 +427,33 @@ button {
     flex: 1 1 auto;
     width: 100%;
     max-width: 100%;
+  }
+
+  .admin-vod-split,
+  .admin-vod-split-head {
+    flex-direction: column;
+  }
+
+  .admin-vod-splitter,
+  .admin-vod-split-head-spacer {
+    display: none;
+  }
+
+  .admin-vod-split .admin-vod-split-pane-left {
+    width: 100% !important;
+    flex: 1 1 auto !important;
+    max-width: 100%;
+  }
+
+  .admin-vod-split .admin-vod-split-pane-right {
+    flex: 1 1 auto !important;
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .admin-vod-split-head .admin-vod-split-pane-left,
+  .admin-vod-split-head .admin-vod-split-pane-right {
+    width: 100% !important;
   }
 }
 

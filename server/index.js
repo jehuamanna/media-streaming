@@ -291,6 +291,44 @@ function resolveVodHlsOutDir(fileId, meta) {
 const vodLocks = new Map();
 const vodFfmpegByFileId = new Map();
 const vodCancelRequested = new Set();
+/** fileId -> { ratio, timeSec, durationSec } for admin UI (from ffmpeg stderr). */
+const vodEncodeProgressByFileId = new Map();
+
+function clearVodEncodeProgress(fileId) {
+  vodEncodeProgressByFileId.delete(fileId);
+}
+
+/** Parse HH:MM:SS.xx from ffmpeg status lines into seconds. */
+function ffmpegHmsToSeconds(h, m, s) {
+  const hh = Number.parseInt(h, 10);
+  const mm = Number.parseInt(m, 10);
+  const ss = Number.parseFloat(s);
+  if (!Number.isFinite(hh) || !Number.isFinite(mm) || !Number.isFinite(ss)) return null;
+  return hh * 3600 + mm * 60 + ss;
+}
+
+function updateVodEncodeProgressFromFfmpegStderr(fileId, tailBuf) {
+  const dur = tailBuf.match(/Duration:\s*(\d+):(\d+):(\d+\.\d+)/);
+  let durationSec = null;
+  if (dur) {
+    durationSec = ffmpegHmsToSeconds(dur[1], dur[2], dur[3]);
+  }
+  let lastTimeSec = null;
+  const re = /time=(\d+):(\d+):(\d+\.\d+)/g;
+  let m;
+  while ((m = re.exec(tailBuf)) !== null) {
+    lastTimeSec = ffmpegHmsToSeconds(m[1], m[2], m[3]);
+  }
+  let ratio = null;
+  if (durationSec != null && durationSec > 0 && lastTimeSec != null) {
+    ratio = Math.min(1, Math.max(0, lastTimeSec / durationSec));
+  }
+  vodEncodeProgressByFileId.set(fileId, {
+    ratio,
+    timeSec: lastTimeSec,
+    durationSec,
+  });
+}
 
 function clearVodHlsCache(fileId) {
   const meta = getFileMeta(fileId);
@@ -317,6 +355,7 @@ function clearVodHlsCache(fileId) {
   } catch {
     /* no lock or ENOENT */
   }
+  clearVodEncodeProgress(fileId);
   vodEncodeLastError.delete(fileId);
   if (!vodLocks.has(fileId)) {
     vodCancelRequested.delete(fileId);
@@ -723,10 +762,15 @@ function ensureVodHls(fileId, opts = {}) {
         throw err;
       }
       console.log(`[vod] ffmpeg start fileId=${fileId}`);
+      clearVodEncodeProgress(fileId);
       ff = spawn('ffmpeg', ffmpegVodArgs(meta, outDir), { stdio: ['ignore', 'ignore', 'pipe'] });
       vodFfmpegByFileId.set(fileId, ff);
+      let progTail = '';
       ff.stderr?.on('data', (d) => {
-        stderr += d.toString();
+        const chunk = d.toString();
+        stderr += chunk;
+        progTail = (progTail + chunk).slice(-120000);
+        updateVodEncodeProgressFromFfmpegStderr(fileId, progTail);
       });
 
       const spawnOrRunError = new Promise((_, rej) => {
@@ -765,6 +809,7 @@ function ensureVodHls(fileId, opts = {}) {
     } finally {
       vodFfmpegByFileId.delete(fileId);
       vodCancelRequested.delete(fileId);
+      clearVodEncodeProgress(fileId);
       try {
         releaseEncodingLock();
       } catch {
@@ -1541,12 +1586,15 @@ app.get('/api/admin/transcode-all/status', authMiddleware(true), requireAdmin, (
   if (!transcodeAllJob) {
     return res.json({ running: false });
   }
+  const curId = transcodeAllJob.currentFileId;
+  const currentProgress = curId ? vodEncodeProgressByFileId.get(curId) || null : null;
   res.json({
     running: true,
     total: transcodeAllJob.total,
     done: transcodeAllJob.done,
     currentFileId: transcodeAllJob.currentFileId,
     startedAt: transcodeAllJob.startedAt,
+    currentProgress,
   });
 });
 
@@ -1613,6 +1661,7 @@ app.get('/api/admin/vod/overview', authMiddleware(true), requireAdmin, (req, res
           title: it.title,
           ready: isVodHlsPlayable(it.id),
           busy: vodLocks.has(it.id),
+          progress: vodEncodeProgressByFileId.get(it.id) || null,
         })),
       })),
     }));
@@ -1721,6 +1770,66 @@ app.post('/api/admin/users', authMiddleware(true), requireAdmin, (req, res) => {
   }
   const user = db.prepare(`SELECT id, username, role, created_at FROM users WHERE username = ?`).get(String(username));
   res.status(201).json({ user });
+});
+
+app.patch('/api/admin/users/:id', authMiddleware(true), requireAdmin, (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!id) {
+    return res.status(400).json({ error: 'Invalid id' });
+  }
+  const target = db.prepare(`SELECT id, username, role FROM users WHERE id = ?`).get(id);
+  if (!target) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+
+  const { username, password } = req.body || {};
+  const hasUsername = username !== undefined && username !== null;
+  const pwdRaw = password !== undefined && password !== null ? String(password) : '';
+  const hasPassword = pwdRaw.length > 0;
+
+  if (!hasUsername && !hasPassword) {
+    return res.status(400).json({ error: 'Provide username and/or password to update' });
+  }
+
+  const sets = [];
+  const vals = [];
+
+  if (hasUsername) {
+    const u = String(username).trim();
+    if (!u) {
+      return res.status(400).json({ error: 'username cannot be empty' });
+    }
+    const taken = db.prepare(`SELECT id FROM users WHERE username = ? AND id != ?`).get(u, id);
+    if (taken) {
+      return res.status(409).json({ error: 'Username taken' });
+    }
+    sets.push('username = ?');
+    vals.push(u);
+  }
+
+  if (hasPassword) {
+    if (pwdRaw.length < 8) {
+      return res.status(400).json({ error: 'password min 8 characters' });
+    }
+    sets.push('password_hash = ?');
+    vals.push(bcrypt.hashSync(pwdRaw, 12));
+    sets.push('must_change_password = 0');
+  }
+
+  vals.push(id);
+  db.prepare(`UPDATE users SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+
+  const updated = db
+    .prepare(`SELECT id, username, role, must_change_password, created_at FROM users WHERE id = ?`)
+    .get(id);
+
+  const payload = {
+    user: updated,
+  };
+  if (req.user.id === id) {
+    payload.token = signToken(updated);
+  }
+  res.json(payload);
 });
 
 app.delete('/api/admin/users/:id', authMiddleware(true), requireAdmin, (req, res) => {

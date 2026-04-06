@@ -100,6 +100,18 @@ function GlobalSearch() {
   );
 }
 
+function ChangePasswordRoute() {
+  const { user, mustChangePassword, loading } = useAuth();
+  if (loading) return <p className="app-shell">Loading…</p>;
+  if (!user) return <Navigate to="/login" replace />;
+  return (
+    <>
+      {!mustChangePassword ? <NavBar /> : null}
+      <ChangePassword />
+    </>
+  );
+}
+
 function NavBar() {
   const { user, logout } = useAuth();
   if (!user) return null;
@@ -130,6 +142,9 @@ function NavBar() {
         }}
       >
         <span style={{ color: 'var(--muted)', fontSize: '0.9rem' }}>{user.username}</span>
+        <Link to="/change-password" className="btn btn-ghost" style={{ fontSize: '0.85rem' }}>
+          Change password
+        </Link>
         <button type="button" className="btn btn-ghost" onClick={logout}>
           Log out
         </button>
@@ -162,7 +177,7 @@ export default function App() {
   return (
     <Routes>
       <Route path="/login" element={<Login />} />
-      <Route path="/change-password" element={<ChangePassword />} />
+      <Route path="/change-password" element={<ChangePasswordRoute />} />
       <Route
         path="/"
         element={

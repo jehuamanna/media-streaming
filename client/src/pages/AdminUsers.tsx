@@ -6,8 +6,13 @@ import {
   useRef,
   useState,
   type ChangeEvent,
+  type Dispatch,
+  type MouseEvent as ReactMouseEvent,
+  type RefObject,
+  type SetStateAction,
 } from 'react';
 import { api } from '../api';
+import { useAuth } from '../auth';
 
 type Row = {
   id: number;
@@ -17,12 +22,54 @@ type Row = {
   created_at: string;
 };
 
+type VodEncodeProgress = {
+  ratio: number | null;
+  timeSec: number | null;
+  durationSec: number | null;
+};
+
 type TranscodeStatus = {
   running: boolean;
   total?: number;
   done?: number;
   currentFileId?: string | null;
+  startedAt?: number;
+  currentProgress?: VodEncodeProgress | null;
 };
+
+function formatEncodeClock(sec: number | null): string {
+  if (sec == null || !Number.isFinite(sec)) return '—';
+  const s = Math.floor(sec % 60);
+  const m = Math.floor(sec / 60) % 60;
+  const h = Math.floor(sec / 3600);
+  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function vodTranscodeLibraryPercent(t: TranscodeStatus): number {
+  if (!t.running || !t.total || t.total < 1) return 0;
+  const done = t.done ?? 0;
+  const cur = t.currentProgress?.ratio ?? 0;
+  return Math.min(100, ((done + cur) / t.total) * 100);
+}
+
+function VodTranscodeProgressBar({ progress }: { progress: VodEncodeProgress | null | undefined }) {
+  const ratio = progress?.ratio;
+  const label =
+    ratio != null
+      ? `${Math.round(ratio * 100)}% · ${formatEncodeClock(progress?.timeSec ?? null)} / ${formatEncodeClock(progress?.durationSec ?? null)}`
+      : 'Starting encoder…';
+  return (
+    <div style={{ marginTop: '0.35rem', width: '100%' }}>
+      <progress
+        style={{ width: '100%', height: '8px', accentColor: 'var(--accent, #3b82f6)' }}
+        max={100}
+        value={typeof ratio === 'number' ? Math.round(ratio * 100) : undefined}
+      />
+      <div style={{ fontSize: '0.7rem', color: 'var(--muted)', marginTop: '0.2rem' }}>{label}</div>
+    </div>
+  );
+}
 
 type VisItem = { id: string; title: string; hidden: boolean; globalHidden?: boolean };
 type VisPlaylist = {
@@ -44,7 +91,13 @@ type VisRoot = {
 type MainTab = 'users' | 'manage';
 type ManageSub = 'transcode' | 'visibility' | 'details';
 
-type VodItem = { id: string; title: string; ready: boolean; busy: boolean };
+type VodItem = {
+  id: string;
+  title: string;
+  ready: boolean;
+  busy: boolean;
+  progress?: VodEncodeProgress | null;
+};
 type VodPlaylist = { id: string; name: string; items: VodItem[] };
 type VodRoot = { id: string; name: string; playlists: VodPlaylist[] };
 
@@ -90,6 +143,32 @@ function VodCourseCheckbox({
   );
 }
 
+function useAdminSplitDrag(
+  containerRef: RefObject<HTMLDivElement | null>,
+  setFrac: Dispatch<SetStateAction<number>>,
+) {
+  return useCallback(
+    (e: ReactMouseEvent) => {
+      e.preventDefault();
+      const onMove = (ev: MouseEvent) => {
+        const row = containerRef.current;
+        if (!row) return;
+        const { left, width } = row.getBoundingClientRect();
+        if (width <= 0) return;
+        const frac = Math.max(0.15, Math.min(0.85, (ev.clientX - left) / width));
+        setFrac(frac);
+      };
+      const onUp = () => {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    },
+    [containerRef, setFrac],
+  );
+}
+
 export default function AdminUsers() {
   const [mainTab, setMainTab] = useState<MainTab>('users');
   const [manageSub, setManageSub] = useState<ManageSub>('transcode');
@@ -98,6 +177,11 @@ export default function AdminUsers() {
   const [password, setPassword] = useState('');
   const [role, setRole] = useState<'user' | 'admin'>('user');
   const [usersError, setUsersError] = useState('');
+  const { setSession } = useAuth();
+  const [editUser, setEditUser] = useState<Row | null>(null);
+  const [editUsername, setEditUsername] = useState('');
+  const [editPassword, setEditPassword] = useState('');
+  const [editSaving, setEditSaving] = useState(false);
   const [vodError, setVodError] = useState('');
   const [visError, setVisError] = useState('');
   const [transcode, setTranscode] = useState<TranscodeStatus>({ running: false });
@@ -120,6 +204,14 @@ export default function AdminUsers() {
   const [vodLoading, setVodLoading] = useState(false);
   const [vodSelectedRootId, setVodSelectedRootId] = useState<string | null>(null);
   const [vodMsg, setVodMsg] = useState('');
+  /** Left column width as a fraction of the split row (default 60% / 40%). */
+  const [vodLeftFrac, setVodLeftFrac] = useState(0.6);
+  const vodSplitRef = useRef<HTMLDivElement>(null);
+  const onVodSplitterMouseDown = useAdminSplitDrag(vodSplitRef, setVodLeftFrac);
+
+  const [visLeftFrac, setVisLeftFrac] = useState(0.6);
+  const visSplitRef = useRef<HTMLDivElement>(null);
+  const onVisSplitterMouseDown = useAdminSplitDrag(visSplitRef, setVisLeftFrac);
 
   async function loadUsers() {
     const r = await api<{ users: Row[] }>('/api/admin/users');
@@ -158,6 +250,13 @@ export default function AdminUsers() {
   }, []);
 
   useEffect(() => {
+    if (mainTab !== 'users') {
+      setEditUser(null);
+      setEditPassword('');
+    }
+  }, [mainTab]);
+
+  useEffect(() => {
     void api<TranscodeStatus>('/api/admin/transcode-all/status')
       .then((s) => {
         if (s.running) setTranscode(s);
@@ -171,7 +270,7 @@ export default function AdminUsers() {
       void api<TranscodeStatus>('/api/admin/transcode-all/status')
         .then((s) => setTranscode(s))
         .catch(() => setTranscode({ running: false }));
-    }, 2000);
+    }, 1000);
     return () => clearInterval(t);
   }, [transcode.running]);
 
@@ -204,10 +303,10 @@ export default function AdminUsers() {
 
   useEffect(() => {
     if (mainTab !== 'manage' || manageSub !== 'transcode') return;
-    if (!vodAnyBusy) return;
-    const t = window.setInterval(() => void loadVodOverview({ quiet: true }), 2000);
+    if (!vodAnyBusy && !transcode.running) return;
+    const t = window.setInterval(() => void loadVodOverview({ quiet: true }), 1000);
     return () => clearInterval(t);
-  }, [mainTab, manageSub, vodAnyBusy, loadVodOverview]);
+  }, [mainTab, manageSub, vodAnyBusy, transcode.running, loadVodOverview]);
 
   useEffect(() => {
     if (mainTab !== 'manage' || manageSub !== 'details') return;
@@ -276,6 +375,42 @@ export default function AdminUsers() {
       await loadUsers();
     } catch (err) {
       setUsersError(err instanceof Error ? err.message : 'Failed');
+    }
+  }
+
+  async function onSaveUserEdit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!editUser) return;
+    setUsersError('');
+    const body: { username?: string; password?: string } = {};
+    const nu = editUsername.trim();
+    if (nu !== editUser.username) body.username = nu;
+    const pw = editPassword.trim();
+    if (pw) body.password = pw;
+    if (body.username === undefined && body.password === undefined) {
+      setUsersError('Change the username and/or enter a new password.');
+      return;
+    }
+    setEditSaving(true);
+    try {
+      const r = await api<{ user: Row; token?: string }>(`/api/admin/users/${editUser.id}`, {
+        method: 'PATCH',
+        json: body,
+      });
+      if (r.token) {
+        setSession(
+          r.token,
+          { id: r.user.id, username: r.user.username, role: r.user.role },
+          !!r.user.must_change_password,
+        );
+      }
+      setEditUser(null);
+      setEditPassword('');
+      await loadUsers();
+    } catch (err) {
+      setUsersError(err instanceof Error ? err.message : 'Failed');
+    } finally {
+      setEditSaving(false);
     }
   }
 
@@ -577,7 +712,7 @@ export default function AdminUsers() {
                 <th>Username</th>
                 <th>Role</th>
                 <th>Must change pwd</th>
-                <th />
+                <th>Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -587,7 +722,19 @@ export default function AdminUsers() {
                   <td>{u.username}</td>
                   <td>{u.role}</td>
                   <td>{u.must_change_password ? 'yes' : 'no'}</td>
-                  <td>
+                  <td style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      onClick={() => {
+                        setEditUser(u);
+                        setEditUsername(u.username);
+                        setEditPassword('');
+                        setUsersError('');
+                      }}
+                    >
+                      Edit
+                    </button>
                     <button type="button" className="btn btn-ghost" onClick={() => remove(u.id)}>
                       Delete
                     </button>
@@ -596,6 +743,47 @@ export default function AdminUsers() {
               ))}
             </tbody>
           </table>
+          {editUser ? (
+            <form className="form-panel" onSubmit={onSaveUserEdit} style={{ marginTop: '1.25rem', maxWidth: 420 }}>
+              <h2 style={{ marginTop: 0 }}>Edit user</h2>
+              <p style={{ color: 'var(--muted)', marginTop: 0 }}>
+                User ID {editUser.id} · {editUser.role}. Setting a new password clears “must change password” so the user
+                can use the library and change their password from the account menu when they want.
+              </p>
+              <label htmlFor="eu-name">Username</label>
+              <input
+                id="eu-name"
+                value={editUsername}
+                onChange={(e) => setEditUsername(e.target.value)}
+                autoComplete="off"
+              />
+              <label htmlFor="eu-pw">New password (optional, min 8)</label>
+              <input
+                id="eu-pw"
+                type="password"
+                value={editPassword}
+                onChange={(e) => setEditPassword(e.target.value)}
+                autoComplete="new-password"
+                placeholder="Leave blank to keep current"
+              />
+              <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                <button type="submit" className="btn btn-primary" disabled={editSaving}>
+                  {editSaving ? 'Saving…' : 'Save changes'}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  disabled={editSaving}
+                  onClick={() => {
+                    setEditUser(null);
+                    setEditPassword('');
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          ) : null}
         </>
       ) : (
         <>
@@ -630,14 +818,21 @@ export default function AdminUsers() {
                 not listed.
               </p>
               {vodLoading && !vodOverview ? <p>Loading…</p> : null}
-              <div className="admin-two-pane-head">
-                <div className="admin-two-pane-col-left">Courses</div>
-                <div className="admin-two-pane-col-right">Videos</div>
+              <div className="admin-vod-split-head">
+                <div className="admin-vod-split-pane-left admin-vod-split-head-label" style={{ width: `${vodLeftFrac * 100}%` }}>
+                  Courses
+                </div>
+                <div className="admin-vod-split-head-spacer" aria-hidden />
+                <div className="admin-vod-split-pane-right admin-vod-split-head-label" style={{ flex: 1, minWidth: 0 }}>
+                  Videos
+                </div>
               </div>
-              <div className="admin-two-pane">
+              <div ref={vodSplitRef} className="admin-vod-split">
                 <div
-                  className="admin-two-pane-col-left"
+                  className="admin-vod-split-pane-left"
                   style={{
+                    width: `${vodLeftFrac * 100}%`,
+                    flexShrink: 0,
                     border: '1px solid var(--border)',
                     borderRadius: 14,
                     padding: '0.65rem',
@@ -646,6 +841,7 @@ export default function AdminUsers() {
                     gap: '0.45rem',
                     maxHeight: '70vh',
                     overflowY: 'auto',
+                    minWidth: 0,
                   }}
                 >
                   {vodOverview?.map((root) => {
@@ -734,8 +930,28 @@ export default function AdminUsers() {
                   })}
                 </div>
                 <div
-                  className="admin-two-pane-col-right"
+                  role="separator"
+                  aria-orientation="vertical"
+                  aria-label="Resize course and video columns"
+                  tabIndex={0}
+                  className="admin-vod-splitter"
+                  onMouseDown={onVodSplitterMouseDown}
+                  onKeyDown={(ke) => {
+                    const step = ke.shiftKey ? 0.05 : 0.02;
+                    if (ke.key === 'ArrowLeft') {
+                      ke.preventDefault();
+                      setVodLeftFrac((f) => Math.max(0.15, f - step));
+                    } else if (ke.key === 'ArrowRight') {
+                      ke.preventDefault();
+                      setVodLeftFrac((f) => Math.min(0.85, f + step));
+                    }
+                  }}
+                />
+                <div
+                  className="admin-vod-split-pane-right"
                   style={{
+                    flex: 1,
+                    minWidth: 0,
                     minHeight: '12rem',
                     border: '1px solid var(--border)',
                     borderRadius: 14,
@@ -775,9 +991,6 @@ export default function AdminUsers() {
                                 <li key={it.id} style={{ marginBottom: '0.35rem' }}>
                                   <div
                                     style={{
-                                      display: 'flex',
-                                      alignItems: 'center',
-                                      gap: '0.6rem',
                                       padding: '0.45rem 0.65rem',
                                       borderRadius: 10,
                                       border: '1px solid var(--border)',
@@ -785,68 +998,72 @@ export default function AdminUsers() {
                                       opacity: it.busy ? 0.72 : 1,
                                     }}
                                   >
-                                    <label
-                                      htmlFor={`vod-ready-${it.id}`}
+                                    <div
                                       style={{
                                         display: 'flex',
                                         alignItems: 'center',
                                         gap: '0.6rem',
-                                        flex: 1,
-                                        minWidth: 0,
-                                        cursor: it.busy ? 'default' : 'pointer',
-                                        margin: 0,
                                       }}
                                     >
-                                      <input
-                                        id={`vod-ready-${it.id}`}
-                                        type="checkbox"
-                                        checked={it.ready}
-                                        disabled={it.busy}
-                                        title={
-                                          it.busy
-                                            ? 'Transcoding…'
-                                            : it.ready
-                                              ? 'HLS ready. Click clears cache; use Re-encode to replace.'
-                                              : 'Check to start transcoding'
-                                        }
-                                        onChange={(e) => {
-                                          if (it.busy) {
-                                            e.target.checked = it.ready;
-                                            return;
-                                          }
-                                          const wantOn = e.target.checked;
-                                          if (wantOn && !it.ready) {
-                                            void vodStartFile(it.id);
-                                          } else if (!wantOn && it.ready) {
-                                            if (confirm(`Clear HLS cache for “${it.title}”?`)) void vodClearFile(it.id);
-                                            else e.target.checked = it.ready;
-                                          } else {
-                                            e.target.checked = it.ready;
-                                          }
-                                        }}
-                                      />
-                                      <span style={{ flex: 1, minWidth: 0, wordBreak: 'break-word' }}>{it.title}</span>
-                                    </label>
-                                    {it.ready && !it.busy ? (
-                                      <button
-                                        type="button"
-                                        className="btn btn-ghost"
-                                        style={{ fontSize: '0.75rem', padding: '0.2rem 0.45rem', flexShrink: 0 }}
-                                        title="Replace HLS for this file"
-                                        onClick={() => {
-                                          if (confirm(`Re-encode “${it.title}”? This replaces the current HLS cache.`)) {
-                                            void vodStartFile(it.id);
-                                          }
+                                      <label
+                                        htmlFor={`vod-ready-${it.id}`}
+                                        style={{
+                                          display: 'flex',
+                                          alignItems: 'center',
+                                          gap: '0.6rem',
+                                          flex: 1,
+                                          minWidth: 0,
+                                          cursor: it.busy ? 'default' : 'pointer',
+                                          margin: 0,
                                         }}
                                       >
-                                        Re-encode
-                                      </button>
-                                    ) : null}
-                                    {it.busy ? (
-                                      <span style={{ fontSize: '0.75rem', color: 'var(--muted)', flexShrink: 0 }}>
-                                        Working…
-                                      </span>
-                                    ) : null}
+                                        <input
+                                          id={`vod-ready-${it.id}`}
+                                          type="checkbox"
+                                          checked={it.ready}
+                                          disabled={it.busy}
+                                          title={
+                                            it.busy
+                                              ? 'Transcoding…'
+                                              : it.ready
+                                                ? 'HLS ready. Click clears cache; use Re-encode to replace.'
+                                                : 'Check to start transcoding'
+                                          }
+                                          onChange={(e) => {
+                                            if (it.busy) {
+                                              e.target.checked = it.ready;
+                                              return;
+                                            }
+                                            const wantOn = e.target.checked;
+                                            if (wantOn && !it.ready) {
+                                              void vodStartFile(it.id);
+                                            } else if (!wantOn && it.ready) {
+                                              if (confirm(`Clear HLS cache for “${it.title}”?`)) void vodClearFile(it.id);
+                                              else e.target.checked = it.ready;
+                                            } else {
+                                              e.target.checked = it.ready;
+                                            }
+                                          }}
+                                        />
+                                        <span style={{ flex: 1, minWidth: 0, wordBreak: 'break-word' }}>{it.title}</span>
+                                      </label>
+                                      {it.ready && !it.busy ? (
+                                        <button
+                                          type="button"
+                                          className="btn btn-ghost"
+                                          style={{ fontSize: '0.75rem', padding: '0.2rem 0.45rem', flexShrink: 0 }}
+                                          title="Replace HLS for this file"
+                                          onClick={() => {
+                                            if (confirm(`Re-encode “${it.title}”? This replaces the current HLS cache.`)) {
+                                              void vodStartFile(it.id);
+                                            }
+                                          }}
+                                        >
+                                          Re-encode
+                                        </button>
+                                      ) : null}
+                                    </div>
+                                    {it.busy ? <VodTranscodeProgressBar progress={it.progress} /> : null}
                                   </div>
                                 </li>
                               ))}
@@ -864,16 +1081,37 @@ export default function AdminUsers() {
                 Batch transcode every video under <code>VIDEOS_DIR</code>. Already-cached files are skipped quickly.
               </p>
               {transcode.running ? (
-                <p>
-                  Transcoding: <strong>{transcode.done ?? 0}</strong> /{' '}
-                  <strong>{transcode.total ?? '…'}</strong>
-                  {transcode.currentFileId ? (
-                    <span style={{ color: 'var(--muted)', fontSize: '0.85rem' }}>
-                      {' '}
-                      ({transcode.currentFileId})
-                    </span>
+                <div style={{ maxWidth: '36rem' }}>
+                  <p style={{ marginBottom: '0.5rem' }}>
+                    Library transcode: <strong>{transcode.done ?? 0}</strong> /{' '}
+                    <strong>{transcode.total ?? '…'}</strong> files done
+                    {transcode.currentFileId ? (
+                      <span style={{ color: 'var(--muted)', fontSize: '0.85rem', display: 'block', marginTop: '0.25rem' }}>
+                        Current: <code style={{ fontSize: '0.8rem' }}>{transcode.currentFileId}</code>
+                      </span>
+                    ) : null}
+                  </p>
+                  <progress
+                    style={{ width: '100%', height: '10px', accentColor: 'var(--accent, #3b82f6)' }}
+                    max={100}
+                    value={Math.round(vodTranscodeLibraryPercent(transcode))}
+                  />
+                  <div style={{ fontSize: '0.75rem', color: 'var(--muted)', marginTop: '0.35rem' }}>
+                    Overall ~{Math.round(vodTranscodeLibraryPercent(transcode))}% (includes in-progress file)
+                  </div>
+                  {transcode.currentProgress ? (
+                    <div style={{ marginTop: '0.75rem' }}>
+                      <div style={{ fontSize: '0.8rem', fontWeight: 600, marginBottom: '0.25rem' }}>
+                        Current file
+                      </div>
+                      <VodTranscodeProgressBar progress={transcode.currentProgress} />
+                    </div>
+                  ) : transcode.currentFileId ? (
+                    <p style={{ fontSize: '0.75rem', color: 'var(--muted)', marginTop: '0.5rem', marginBottom: 0 }}>
+                      Waiting for encoder output…
+                    </p>
                   ) : null}
-                </p>
+                </div>
               ) : null}
               {transcodeMsg ? <p style={{ color: 'var(--muted)' }}>{transcodeMsg}</p> : null}
               <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
@@ -927,14 +1165,27 @@ export default function AdminUsers() {
                 each video or PDF. If the course is hidden, learners see nothing from it until you show it again.
               </p>
               {visLoading ? <p>Loading…</p> : null}
-              <div className="admin-two-pane-head">
-                <div className="admin-two-pane-col-left">Courses</div>
-                <div className="admin-two-pane-col-right">Videos & files</div>
-              </div>
-              <div className="admin-two-pane">
+              <div className="admin-vod-split-head">
                 <div
-                  className="admin-two-pane-col-left"
+                  className="admin-vod-split-pane-left admin-vod-split-head-label"
+                  style={{ width: `${visLeftFrac * 100}%` }}
+                >
+                  Courses
+                </div>
+                <div className="admin-vod-split-head-spacer" aria-hidden />
+                <div
+                  className="admin-vod-split-pane-right admin-vod-split-head-label"
+                  style={{ flex: 1, minWidth: 0 }}
+                >
+                  Videos & files
+                </div>
+              </div>
+              <div ref={visSplitRef} className="admin-vod-split">
+                <div
+                  className="admin-vod-split-pane-left"
                   style={{
+                    width: `${visLeftFrac * 100}%`,
+                    flexShrink: 0,
                     border: '1px solid var(--border)',
                     borderRadius: 14,
                     padding: '0.65rem',
@@ -943,6 +1194,7 @@ export default function AdminUsers() {
                     gap: '0.45rem',
                     maxHeight: '70vh',
                     overflowY: 'auto',
+                    minWidth: 0,
                   }}
                 >
                   {visRoots?.map((r) => {
@@ -1011,8 +1263,28 @@ export default function AdminUsers() {
                   })}
                 </div>
                 <div
-                  className="admin-two-pane-col-right"
+                  role="separator"
+                  aria-orientation="vertical"
+                  aria-label="Resize course and file list columns"
+                  tabIndex={0}
+                  className="admin-vod-splitter"
+                  onMouseDown={onVisSplitterMouseDown}
+                  onKeyDown={(ke) => {
+                    const step = ke.shiftKey ? 0.05 : 0.02;
+                    if (ke.key === 'ArrowLeft') {
+                      ke.preventDefault();
+                      setVisLeftFrac((f) => Math.max(0.15, f - step));
+                    } else if (ke.key === 'ArrowRight') {
+                      ke.preventDefault();
+                      setVisLeftFrac((f) => Math.min(0.85, f + step));
+                    }
+                  }}
+                />
+                <div
+                  className="admin-vod-split-pane-right"
                   style={{
+                    flex: 1,
+                    minWidth: 0,
                     minHeight: '12rem',
                     border: '1px solid var(--border)',
                     borderRadius: 14,
