@@ -471,11 +471,11 @@ function tryAcquireEncodingLock(fileId, depth = 0) {
   }
 }
 
-async function waitForVodFromPeer(fileId, outDir, indexPath, srcMtime) {
+async function waitForVodFromPeer(fileId, outDir) {
   const deadline = Date.now() + VOD_PLAYABLE_WAIT_MS;
   const lockP = vodEncodingLockPath(fileId);
   while (Date.now() < deadline) {
-    if (vodIndexFresh(indexPath, srcMtime)) {
+    if (isVodHlsPlayable(fileId)) {
       return outDir;
     }
     if (!fs.existsSync(lockP)) {
@@ -613,17 +613,15 @@ function ensureVodHls(fileId, opts = {}) {
     err.code = 'NOT_FOUND';
     return Promise.reject(err);
   }
-  const indexPath = path.join(outDir, 'index.m3u8');
-  let srcMtime = 0;
   try {
-    srcMtime = fs.statSync(meta.absPath).mtimeMs;
+    fs.statSync(meta.absPath);
   } catch {
     const err = new Error('NOT_FOUND');
     err.code = 'NOT_FOUND';
     return Promise.reject(err);
   }
-  // Match /api/vod/playable: mtime-only "fresh" index can be empty or missing segments after a crash.
-  if (isVodHlsPlayable(fileId)) {
+  // Admin "transcode" may pass force to rebuild even when cache looks playable.
+  if (!opts.force && isVodHlsPlayable(fileId)) {
     vodEncodeLastError.delete(fileId);
     return Promise.resolve(outDir);
   }
@@ -640,7 +638,7 @@ function ensureVodHls(fileId, opts = {}) {
 
   const releaseEncodingLock = tryAcquireEncodingLock(fileId);
   if (!releaseEncodingLock) {
-    return waitForVodFromPeer(fileId, outDir, indexPath, srcMtime);
+    return waitForVodFromPeer(fileId, outDir);
   }
 
   let resolveHttp;
@@ -1589,10 +1587,21 @@ app.post('/api/admin/vod/transcode/:fileId', authMiddleware(true), requireAdmin,
   const m = getFileMeta(fileId);
   if (!m || m.kind === 'pdf') return res.status(404).json({ error: 'not_found' });
   vodEncodeLastError.delete(fileId);
-  void ensureVodHls(fileId, { ignoreCooldown: true }).catch((e) => {
-    if (e?.code && e.code !== 'NOT_FOUND' && e.code !== 'CANCELLED')
-      console.error('[admin vod transcode]', e);
-  });
+  const pending = vodLocks.get(fileId);
+  clearVodHlsCache(fileId);
+  void (async () => {
+    if (pending) {
+      try {
+        await pending;
+      } catch {
+        /* cancelled / failed prior run */
+      }
+    }
+    await ensureVodHls(fileId, { ignoreCooldown: true, force: true }).catch((e) => {
+      if (e?.code && e.code !== 'NOT_FOUND' && e.code !== 'CANCELLED')
+        console.error('[admin vod transcode]', e);
+    });
+  })();
   res.json({ ok: true });
 });
 
