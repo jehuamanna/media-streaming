@@ -491,7 +491,7 @@ export default function AdminUsers() {
               <p style={{ color: 'var(--muted)', marginTop: 0 }}>
                 {visForUserId
                   ? 'Per-user hides add on top of global visibility. Checkboxes locked by global rules cannot be shown for this user alone.'
-                  : 'Select a course on the left, then adjust playlists, videos, and PDFs in the scrollable panel on the right. Uncheck to hide from learners.'}
+                  : 'Select a course on the left (scroll if needed), then adjust playlists, videos, and PDFs in the scrollable panel on the right. Uncheck to hide from learners.'}
               </p>
               {visLoading ? <p>Loading…</p> : null}
               <div
@@ -509,6 +509,7 @@ export default function AdminUsers() {
                   style={{
                     flex: '0 0 14rem',
                     minWidth: '12rem',
+                    minHeight: 0,
                     border: '1px solid var(--border)',
                     borderRadius: '6px',
                     padding: '0.5rem',
