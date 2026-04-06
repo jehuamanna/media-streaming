@@ -1620,11 +1620,12 @@ app.post('/api/admin/vod/transcode-root/:rootId', authMiddleware(true), requireA
   const root = roots.find((r) => r.id === rootId);
   if (!root) return res.status(404).json({ error: 'not_found' });
   const ids = videoFileIdsForRoot(root);
-  res.json({ ok: true, queued: ids.length });
+  const force = Boolean(req.body && req.body.force);
+  res.json({ ok: true, queued: ids.length, force });
   void (async () => {
     for (const id of ids) {
       try {
-        await ensureVodHls(id, { ignoreCooldown: true });
+        await ensureVodHls(id, { ignoreCooldown: true, force });
       } catch (e) {
         if (e?.code !== 'CANCELLED') console.error(`[transcode-root] ${rootId} ${id}`, e?.message || e);
       }

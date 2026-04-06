@@ -64,11 +64,13 @@ function VodCourseCheckbox({
   allReady,
   someReady,
   disabled,
+  title,
   onChange,
 }: {
   allReady: boolean;
   someReady: boolean;
   disabled?: boolean;
+  title?: string;
   onChange: (e: ChangeEvent<HTMLInputElement>) => void;
 }) {
   const ref = useRef<HTMLInputElement>(null);
@@ -81,6 +83,7 @@ function VodCourseCheckbox({
       type="checkbox"
       checked={allReady}
       disabled={disabled}
+      title={title}
       onChange={onChange}
       style={{ marginTop: '0.15rem', flexShrink: 0 }}
     />
@@ -296,14 +299,18 @@ export default function AdminUsers() {
     }
   }
 
-  async function vodStartCourse(rootId: string) {
+  async function vodStartCourse(rootId: string, opts?: { force?: boolean }) {
     setVodMsg('');
     try {
       const r = await api<{ ok: boolean; queued: number }>(
         `/api/admin/vod/transcode-root/${encodeURIComponent(rootId)}`,
-        { method: 'POST' },
+        { method: 'POST', json: { force: Boolean(opts?.force) } },
       );
-      setVodMsg(`Queued ${r.queued} video(s).`);
+      setVodMsg(
+        opts?.force
+          ? `Re-encoding ${r.queued} video(s) in this course (replaces existing HLS).`
+          : `Queued ${r.queued} video(s) (only videos without ready HLS are encoded).`,
+      );
       await loadVodOverview({ quiet: true });
     } catch (e) {
       setVodMsg(e instanceof Error ? e.message : 'Failed');
@@ -614,9 +621,13 @@ export default function AdminUsers() {
             <section className="form-panel form-panel-wide">
               <h2 style={{ marginTop: 0 }}>Video library (HLS cache)</h2>
               <p style={{ color: 'var(--muted)', marginTop: 0 }}>
-                Select a course on the left. Checkboxes: checked means HLS is ready for playback. Uncheck to clear
-                cache (stop serving encoded segments). One check starts transcoding for that video or whole course.
-                PDFs are not listed.
+                Select a course on the left. Each checkbox reflects <strong>current</strong> state: checked only when
+                HLS is already ready. To <strong>start</strong> transcoding, click an <strong>unchecked</strong> box to
+                check it. If a box is already checked, a click tries to <strong>uncheck</strong> (clear cache)—it does
+                not start a new encode. To rebuild something that already shows checked, use <strong>Re-encode</strong>{' '}
+                or uncheck (clear) and then check again. The course checkbox only encodes videos that are still
+                unchecked; use <strong>Re-encode course</strong> to replace HLS for every video in that course. PDFs are
+                not listed.
               </p>
               {vodLoading && !vodOverview ? <p>Loading…</p> : null}
               <div className="admin-two-pane-head">
@@ -659,6 +670,13 @@ export default function AdminUsers() {
                           allReady={stats.allReady}
                           someReady={stats.someReady}
                           disabled={stats.count === 0}
+                          title={
+                            stats.count === 0
+                              ? undefined
+                              : stats.allReady
+                                ? 'All videos have HLS. Click to clear cache, or use Re-encode course to replace HLS.'
+                                : 'Check to encode videos that are not ready yet. Indeterminate = some ready.'
+                          }
                           onChange={(e) => {
                             if (stats.count === 0) return;
                             const wantOn = e.target.checked;
@@ -692,6 +710,25 @@ export default function AdminUsers() {
                         >
                           {root.name}
                         </button>
+                        {stats.count > 0 ? (
+                          <button
+                            type="button"
+                            className="btn btn-ghost"
+                            style={{ fontSize: '0.75rem', padding: '0.25rem 0.45rem', flexShrink: 0 }}
+                            title="Replace HLS for every video in this course"
+                            onClick={() => {
+                              if (
+                                confirm(
+                                  `Re-encode all videos in “${root.name}”? This replaces existing HLS cache.`,
+                                )
+                              ) {
+                                void vodStartCourse(root.id, { force: true });
+                              }
+                            }}
+                          >
+                            Re-encode course
+                          </button>
+                        ) : null}
                       </div>
                     );
                   })}
@@ -736,7 +773,7 @@ export default function AdminUsers() {
                             <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
                               {pl.items.map((it) => (
                                 <li key={it.id} style={{ marginBottom: '0.35rem' }}>
-                                  <label
+                                  <div
                                     style={{
                                       display: 'flex',
                                       alignItems: 'center',
@@ -745,38 +782,72 @@ export default function AdminUsers() {
                                       borderRadius: 10,
                                       border: '1px solid var(--border)',
                                       background: 'var(--surface)',
-                                      cursor: it.busy ? 'default' : 'pointer',
                                       opacity: it.busy ? 0.72 : 1,
                                     }}
                                   >
-                                    <input
-                                      type="checkbox"
-                                      checked={it.ready}
-                                      disabled={it.busy}
-                                      title={it.busy ? 'Transcoding…' : undefined}
-                                      onChange={(e) => {
-                                        if (it.busy) {
-                                          e.target.checked = it.ready;
-                                          return;
-                                        }
-                                        const wantOn = e.target.checked;
-                                        if (wantOn && !it.ready) {
-                                          void vodStartFile(it.id);
-                                        } else if (!wantOn && it.ready) {
-                                          if (confirm(`Clear HLS cache for “${it.title}”?`)) void vodClearFile(it.id);
-                                          else e.target.checked = it.ready;
-                                        } else {
-                                          e.target.checked = it.ready;
-                                        }
+                                    <label
+                                      htmlFor={`vod-ready-${it.id}`}
+                                      style={{
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: '0.6rem',
+                                        flex: 1,
+                                        minWidth: 0,
+                                        cursor: it.busy ? 'default' : 'pointer',
+                                        margin: 0,
                                       }}
-                                    />
-                                    <span style={{ flex: 1, minWidth: 0, wordBreak: 'break-word' }}>{it.title}</span>
+                                    >
+                                      <input
+                                        id={`vod-ready-${it.id}`}
+                                        type="checkbox"
+                                        checked={it.ready}
+                                        disabled={it.busy}
+                                        title={
+                                          it.busy
+                                            ? 'Transcoding…'
+                                            : it.ready
+                                              ? 'HLS ready. Click clears cache; use Re-encode to replace.'
+                                              : 'Check to start transcoding'
+                                        }
+                                        onChange={(e) => {
+                                          if (it.busy) {
+                                            e.target.checked = it.ready;
+                                            return;
+                                          }
+                                          const wantOn = e.target.checked;
+                                          if (wantOn && !it.ready) {
+                                            void vodStartFile(it.id);
+                                          } else if (!wantOn && it.ready) {
+                                            if (confirm(`Clear HLS cache for “${it.title}”?`)) void vodClearFile(it.id);
+                                            else e.target.checked = it.ready;
+                                          } else {
+                                            e.target.checked = it.ready;
+                                          }
+                                        }}
+                                      />
+                                      <span style={{ flex: 1, minWidth: 0, wordBreak: 'break-word' }}>{it.title}</span>
+                                    </label>
+                                    {it.ready && !it.busy ? (
+                                      <button
+                                        type="button"
+                                        className="btn btn-ghost"
+                                        style={{ fontSize: '0.75rem', padding: '0.2rem 0.45rem', flexShrink: 0 }}
+                                        title="Replace HLS for this file"
+                                        onClick={() => {
+                                          if (confirm(`Re-encode “${it.title}”? This replaces the current HLS cache.`)) {
+                                            void vodStartFile(it.id);
+                                          }
+                                        }}
+                                      >
+                                        Re-encode
+                                      </button>
+                                    ) : null}
                                     {it.busy ? (
                                       <span style={{ fontSize: '0.75rem', color: 'var(--muted)', flexShrink: 0 }}>
                                         Working…
                                       </span>
                                     ) : null}
-                                  </label>
+                                  </div>
                                 </li>
                               ))}
                             </ul>
