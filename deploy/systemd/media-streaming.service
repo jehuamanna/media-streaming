@@ -14,18 +14,20 @@ TimeoutStartSec=0
 TimeoutStopSec=45
 
 Environment=CONTAINER_NAME=media-streaming IMAGE=media-streaming:latest
-Environment=VIDEOS_PATH=/streaming/Videos DATA_VOLUME=media-streaming-data
-Environment=HTTP_PORT=8020 RTMP_PORT=1935 VIDEOS_MOUNT_SUFFIX= VOD_HLS_LAYOUT=sidecar
+Environment=VIDEOS_PATH=/streaming/Videos DATA_VOLUME=media-streaming-data HLS_VOLUME=media-streaming-hls
+Environment=HTTP_PORT=8020 RTMP_PORT=1935 VIDEOS_MOUNT_SUFFIX= VOD_HLS_LAYOUT=central
 EnvironmentFile=-/etc/media-streaming.env
 
 ExecStartPre=-/usr/bin/docker rm -f ${CONTAINER_NAME}
 ExecStartPre=/usr/bin/docker volume create ${DATA_VOLUME}
+ExecStartPre=/usr/bin/docker volume create ${HLS_VOLUME}
 ExecStart=/usr/bin/docker run --name ${CONTAINER_NAME} --rm \
   -e JWT_SECRET -e ADMIN_INITIAL_PASSWORD -e VOD_HLS_LAYOUT \
   -p ${HTTP_PORT}:8020 \
   -p ${RTMP_PORT}:1935 \
   -v ${VIDEOS_PATH}:/streaming/Videos${VIDEOS_MOUNT_SUFFIX} \
   -v ${DATA_VOLUME}:/data \
+  -v ${HLS_VOLUME}:/var/hls/vod \
   ${IMAGE}
 
 ExecStop=-/usr/bin/docker stop -t 20 ${CONTAINER_NAME}
