@@ -740,7 +740,8 @@ function initDb() {
       added_at TEXT,
       language TEXT,
       description_markdown TEXT,
-      tags TEXT
+      tags TEXT,
+      categories TEXT
     );
     CREATE TABLE IF NOT EXISTS media_duration (
       file_id TEXT PRIMARY KEY,
@@ -788,6 +789,9 @@ function initDb() {
   if (!courseMetaCols.some((c) => c.name === 'tags')) {
     db.exec(`ALTER TABLE course_metadata ADD COLUMN tags TEXT`);
   }
+  if (!courseMetaCols.some((c) => c.name === 'categories')) {
+    db.exec(`ALTER TABLE course_metadata ADD COLUMN categories TEXT`);
+  }
 
   return db;
 }
@@ -823,6 +827,51 @@ function parseCourseTagsColumn(raw) {
   } catch {
     return [];
   }
+}
+
+function normalizeCourseCategoriesInput(input) {
+  if (!Array.isArray(input)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const item of input) {
+    let name = '';
+    let url = null;
+    if (typeof item === 'string') {
+      name = String(item).trim();
+    } else if (item && typeof item === 'object') {
+      name = String(item.name ?? item.label ?? '').trim();
+      const u = item.url ?? item.categoryUrl;
+      if (u != null && String(u).trim()) url = String(u).trim().slice(0, 2048);
+    }
+    if (!name || name.length > 128) continue;
+    const k = name.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push({ name, url });
+    if (out.length >= 20) break;
+  }
+  return out;
+}
+
+function parseCourseCategoriesColumn(row) {
+  if (row.categories != null && row.categories !== '') {
+    try {
+      const v = JSON.parse(row.categories);
+      const norm = normalizeCourseCategoriesInput(v);
+      if (norm.length > 0) return norm;
+    } catch {
+      /* fall through */
+    }
+  }
+  const c = String(row.category || '').trim();
+  if (c) {
+    const u =
+      row.category_url != null && String(row.category_url).trim()
+        ? String(row.category_url).trim().slice(0, 2048)
+        : null;
+    return [{ name: c, url: u }];
+  }
+  return [];
 }
 
 function loadVisibilityState() {
@@ -923,8 +972,7 @@ function enrichRootForLibrary(root) {
   const row = db.prepare('SELECT * FROM course_metadata WHERE root_id = ?').get(root.id);
   const courseMeta = row
     ? {
-        category: row.category || null,
-        categoryUrl: row.category_url || null,
+        categories: parseCourseCategoriesColumn(row),
         addedAt: row.added_at || null,
         descriptionMarkdown: row.description_markdown || null,
         tags: parseCourseTagsColumn(row.tags),
@@ -1039,10 +1087,16 @@ function buildSearchIndex(roots) {
     const tagPart = Array.isArray(root.courseMeta?.tags)
       ? root.courseMeta.tags.join(' ')
       : '';
+    const catPart = Array.isArray(root.courseMeta?.categories)
+      ? root.courseMeta.categories
+          .map((c) => (c && c.name ? String(c.name) : ''))
+          .filter(Boolean)
+          .join(' ')
+      : '';
     entries.push({
       type: 'course',
       label: root.name,
-      path: [root.name, tagPart].filter(Boolean).join(' '),
+      path: [root.name, tagPart, catPart].filter(Boolean).join(' '),
       rootId: root.id,
       fileId: null,
       playlistId: null,
@@ -1206,7 +1260,11 @@ app.get('/api/similar-courses', authMiddleware(true), (req, res) => {
   const current = enriched.find((r) => r.id === rootId);
   if (!current) return res.json({ courses: [] });
   const others = enriched.filter((r) => r.id !== rootId);
-  const cat = (current.courseMeta?.category || '').trim().toLowerCase();
+  const curCatSet = new Set(
+    (current.courseMeta?.categories || [])
+      .map((c) => (c && c.name ? String(c.name).trim().toLowerCase() : ''))
+      .filter(Boolean),
+  );
   const curTagSet = new Set(
     (current.courseMeta?.tags || []).map((t) => String(t).trim().toLowerCase()).filter(Boolean),
   );
@@ -1215,8 +1273,12 @@ app.get('/api/similar-courses', authMiddleware(true), (req, res) => {
   const byId = new Map();
   for (const o of others) {
     let score = 0;
-    const ocat = (o.courseMeta?.category || '').trim().toLowerCase();
-    if (cat && ocat && cat === ocat) score += 1000;
+    let sharedCats = 0;
+    for (const c of o.courseMeta?.categories || []) {
+      const k = c && c.name ? String(c.name).trim().toLowerCase() : '';
+      if (k && curCatSet.has(k)) sharedCats += 1;
+    }
+    if (sharedCats > 0) score += 1000 + 200 * (sharedCats - 1);
     for (const t of o.courseMeta?.tags || []) {
       const k = String(t).trim().toLowerCase();
       if (k && curTagSet.has(k)) score += 200;
@@ -1454,7 +1516,7 @@ function parseAdminFileIdParam(raw) {
 app.get('/api/admin/vod/overview', authMiddleware(true), requireAdmin, (req, res) => {
   try {
     libraryCache = { at: 0, data: null, fileMap: new Map() };
-    const { roots } = getLibrary();
+    const roots = getLibrary().data.roots;
     const body = roots.map((root) => ({
       id: root.id,
       name: root.name,
@@ -1471,11 +1533,11 @@ app.get('/api/admin/vod/overview', authMiddleware(true), requireAdmin, (req, res
     }));
     res.json({ roots: body });
   } catch (e) {
-    console.error('[admin vod overview]', e);
+    console.error('[admin vod overview]', e?.message || e, e?.stack || '');
     res.status(503).json({
       error:
-        'Video library could not be loaded. Check server logs and that VIDEOS_DIR is readable.',
-      code: 'library_scan_failed',
+        'Video library overview failed. Check server logs. If the library is empty or wrong, verify VIDEOS_DIR exists and is readable.',
+      code: 'library_overview_failed',
     });
   }
 });
@@ -1504,7 +1566,7 @@ app.delete('/api/admin/vod/cache/:fileId', authMiddleware(true), requireAdmin, (
 app.post('/api/admin/vod/transcode-root/:rootId', authMiddleware(true), requireAdmin, (req, res) => {
   const rootId = decodeURIComponent(String(req.params.rootId || ''));
   libraryCache = { at: 0, data: null, fileMap: new Map() };
-  const { roots } = getLibrary();
+  const roots = getLibrary().data.roots;
   const root = roots.find((r) => r.id === rootId);
   if (!root) return res.status(404).json({ error: 'not_found' });
   const ids = videoFileIdsForRoot(root);
@@ -1523,7 +1585,7 @@ app.post('/api/admin/vod/transcode-root/:rootId', authMiddleware(true), requireA
 app.delete('/api/admin/vod/cache-root/:rootId', authMiddleware(true), requireAdmin, (req, res) => {
   const rootId = decodeURIComponent(String(req.params.rootId || ''));
   libraryCache = { at: 0, data: null, fileMap: new Map() };
-  const { roots } = getLibrary();
+  const roots = getLibrary().data.roots;
   const root = roots.find((r) => r.id === rootId);
   if (!root) return res.status(404).json({ error: 'not_found' });
   const ids = videoFileIdsForRoot(root);
@@ -1700,8 +1762,7 @@ app.get('/api/admin/course-metadata/:rootId', authMiddleware(true), requireAdmin
   if (!row) {
     return res.json({
       rootId,
-      category: '',
-      categoryUrl: '',
+      categories: [],
       addedAt: '',
       descriptionMarkdown: '',
       tags: [],
@@ -1709,8 +1770,7 @@ app.get('/api/admin/course-metadata/:rootId', authMiddleware(true), requireAdmin
   }
   res.json({
     rootId: row.root_id,
-    category: row.category || '',
-    categoryUrl: row.category_url || '',
+    categories: parseCourseCategoriesColumn(row),
     addedAt: row.added_at || '',
     descriptionMarkdown: row.description_markdown || '',
     tags: parseCourseTagsColumn(row.tags),
@@ -1719,26 +1779,22 @@ app.get('/api/admin/course-metadata/:rootId', authMiddleware(true), requireAdmin
 
 app.put('/api/admin/course-metadata/:rootId', authMiddleware(true), requireAdmin, (req, res) => {
   const rootId = decodeURIComponent(req.params.rootId);
-  const { category, categoryUrl, addedAt, descriptionMarkdown, tags } = req.body || {};
+  const { categories, addedAt, descriptionMarkdown, tags } = req.body || {};
+  const categoriesNorm = normalizeCourseCategoriesInput(categories);
+  const categoriesJson = categoriesNorm.length > 0 ? JSON.stringify(categoriesNorm) : null;
   const tagsNorm = normalizeCourseTagsInput(tags);
   const tagsJson = tagsNorm.length > 0 ? JSON.stringify(tagsNorm) : null;
   db.prepare(
-    `INSERT INTO course_metadata (root_id, category, category_url, added_at, description_markdown, tags)
-     VALUES (?, ?, ?, ?, ?, ?)
+    `INSERT INTO course_metadata (root_id, category, category_url, added_at, description_markdown, tags, categories)
+     VALUES (?, NULL, NULL, ?, ?, ?, ?)
      ON CONFLICT(root_id) DO UPDATE SET
-       category = excluded.category,
-       category_url = excluded.category_url,
+       category = NULL,
+       category_url = NULL,
        added_at = excluded.added_at,
        description_markdown = excluded.description_markdown,
-       tags = excluded.tags`,
-  ).run(
-    rootId,
-    category ?? null,
-    categoryUrl ?? null,
-    addedAt ?? null,
-    descriptionMarkdown ?? null,
-    tagsJson,
-  );
+       tags = excluded.tags,
+       categories = excluded.categories`,
+  ).run(rootId, addedAt ?? null, descriptionMarkdown ?? null, tagsJson, categoriesJson);
   res.json({ ok: true });
 });
 

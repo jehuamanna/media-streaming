@@ -106,8 +106,7 @@ export default function AdminUsers() {
   const [visForUserId, setVisForUserId] = useState('');
   const [selectedVisRootId, setSelectedVisRootId] = useState<string | null>(null);
   const [metaRootId, setMetaRootId] = useState('');
-  const [metaCategory, setMetaCategory] = useState('');
-  const [metaCategoryUrl, setMetaCategoryUrl] = useState('');
+  const [metaCategories, setMetaCategories] = useState<{ name: string; url: string }[]>([]);
   const [metaAddedAt, setMetaAddedAt] = useState('');
   const [metaTags, setMetaTags] = useState<string[]>([]);
   const [metaTagDraft, setMetaTagDraft] = useState('');
@@ -232,15 +231,18 @@ export default function AdminUsers() {
     setMetaMsg('');
     void api<{
       rootId: string;
-      category: string;
-      categoryUrl: string;
+      categories: { name: string; url: string | null }[];
       addedAt: string;
       descriptionMarkdown: string;
       tags: string[];
     }>(`/api/admin/course-metadata/${encodeURIComponent(metaRootId)}`)
       .then((m) => {
-        setMetaCategory(m.category || '');
-        setMetaCategoryUrl(m.categoryUrl || '');
+        const cats = Array.isArray(m.categories) ? m.categories : [];
+        setMetaCategories(
+          cats.length > 0
+            ? cats.map((c) => ({ name: c.name || '', url: c.url || '' }))
+            : [{ name: '', url: '' }],
+        );
         setMetaAddedAt(m.addedAt || '');
         setMetaTags(Array.isArray(m.tags) ? m.tags : []);
         setMetaTagDraft('');
@@ -467,15 +469,40 @@ export default function AdminUsers() {
     setMetaTags((prev) => prev.filter((t) => t !== tag));
   }
 
+  function addMetaCategoryRow() {
+    setMetaCategories((prev) => {
+      if (prev.length >= 20) return prev;
+      return [...prev, { name: '', url: '' }];
+    });
+  }
+
+  function removeMetaCategoryRow(index: number) {
+    setMetaCategories((prev) => {
+      const next = prev.filter((_, i) => i !== index);
+      return next.length > 0 ? next : [{ name: '', url: '' }];
+    });
+  }
+
+  function setMetaCategoryRow(index: number, field: 'name' | 'url', value: string) {
+    setMetaCategories((prev) =>
+      prev.map((row, i) => (i === index ? { ...row, [field]: value } : row)),
+    );
+  }
+
   async function saveMetadata() {
     if (!metaRootId) return;
     setMetaMsg('');
     try {
+      const categoriesPayload = metaCategories
+        .map((c) => ({
+          name: c.name.trim(),
+          url: c.url.trim() || null,
+        }))
+        .filter((c) => c.name);
       await api(`/api/admin/course-metadata/${encodeURIComponent(metaRootId)}`, {
         method: 'PUT',
         json: {
-          category: metaCategory || null,
-          categoryUrl: metaCategoryUrl || null,
+          categories: categoriesPayload,
           addedAt: metaAddedAt || null,
           descriptionMarkdown: metaDescription || null,
           tags: metaTags,
@@ -815,15 +842,24 @@ export default function AdminUsers() {
                   </option>
                 ))}
               </select>
-              <p style={{ color: 'var(--muted)', marginTop: 0 }}>
-                {visForUserId
-                  ? 'Per-user hides add on top of global visibility. Checkboxes locked by global rules cannot be shown for this user alone.'
-                  : 'Select a course on the left (scroll if needed), then adjust playlists, videos, and PDFs in the scrollable panel on the right. Uncheck to hide from learners.'}
+              {visForUserId ? (
+                <p style={{ color: 'var(--muted)', marginTop: 0 }}>
+                  Per-user hides add on top of global visibility. Checkboxes locked by global rules cannot be shown for
+                  this user alone.
+                </p>
+              ) : null}
+              <p style={{ color: 'var(--muted)', marginTop: visForUserId ? '0.5rem' : 0, marginBottom: 0 }}>
+                Left: use the checkbox to show or hide the entire course in the library
+                {visForUserId ? ' for this user' : ' for all learners'}. Click the course name to load that course’s
+                playlists, videos, and PDFs on the right (the name does not change visibility). Right: uncheck a
+                playlist or file to hide it. If the whole course is unchecked on the left, learners see nothing from
+                that course until the course is shown again; per-playlist and per-file choices apply only when the
+                course itself is visible.
               </p>
               {visLoading ? <p>Loading…</p> : null}
               <div className="admin-two-pane-head">
-                <div className="admin-two-pane-col-left">Courses</div>
-                <div className="admin-two-pane-col-right">Content</div>
+                <div className="admin-two-pane-col-left">Courses (whole course on/off)</div>
+                <div className="admin-two-pane-col-right">Playlists & files for selected course</div>
               </div>
               <div className="admin-two-pane">
                 <div
@@ -856,7 +892,12 @@ export default function AdminUsers() {
                         type="checkbox"
                         checked={!r.hidden}
                         disabled={!!r.globalHidden}
-                        title={r.globalHidden ? 'Hidden for all users (change under All users)' : undefined}
+                        title={
+                          r.globalHidden
+                            ? 'Hidden for all users (change under All users)'
+                            : 'Show or hide the entire course in the library'
+                        }
+                        aria-label={`Show entire course in library: ${r.name}`}
                         onChange={() => {
                           if (r.globalHidden) return;
                           toggleRootHidden(r.id);
@@ -865,6 +906,8 @@ export default function AdminUsers() {
                       />
                       <button
                         type="button"
+                        title="Open this course’s playlists and files on the right"
+                        aria-label={`Select course ${r.name} for playlist and file visibility`}
                         onClick={() => setSelectedVisRootId(r.id)}
                         style={{
                           flex: 1,
@@ -896,11 +939,31 @@ export default function AdminUsers() {
                   {(() => {
                     const r = visRoots?.find((x) => x.id === selectedVisRootId);
                     if (!r) {
-                      return <p style={{ color: 'var(--muted)', margin: 0 }}>Select a course.</p>;
+                      return (
+                        <p style={{ color: 'var(--muted)', margin: 0 }}>
+                          Click a course name on the left to list its playlists and files here.
+                        </p>
+                      );
                     }
                     return (
                       <>
                         <div style={{ fontWeight: 700, marginBottom: '0.75rem' }}>{r.name}</div>
+                        {r.hidden ? (
+                          <p
+                            style={{
+                              color: 'var(--muted)',
+                              margin: '0 0 0.75rem',
+                              padding: '0.5rem 0.65rem',
+                              borderRadius: 6,
+                              border: '1px solid var(--border)',
+                              background: 'color-mix(in srgb, var(--border) 22%, transparent)',
+                            }}
+                          >
+                            This course is hidden for learners, so nothing in it appears in the library. Check the
+                            course on the left to show it again. Playlist and file checkboxes below take effect once
+                            the course is visible.
+                          </p>
+                        ) : null}
                         {r.playlists.map((pl) => (
                           <div key={pl.id} style={{ marginBottom: '1rem' }}>
                             <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
@@ -1009,10 +1072,56 @@ export default function AdminUsers() {
                 </button>
               ) : null}
               {metaLoading ? <p>Loading…</p> : null}
-              <label htmlFor="cat">Category</label>
-              <input id="cat" value={metaCategory} onChange={(e) => setMetaCategory(e.target.value)} />
-              <label htmlFor="catu">Category URL (optional)</label>
-              <input id="catu" value={metaCategoryUrl} onChange={(e) => setMetaCategoryUrl(e.target.value)} />
+              <div style={{ marginBottom: '0.5rem' }}>
+                <span id="cats-label">Categories</span>
+                <p style={{ color: 'var(--muted)', fontSize: '0.85rem', margin: '0.25rem 0 0.5rem' }}>
+                  Optional link per category (max 20, 128 characters per name).
+                </p>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                  {metaCategories.map((row, index) => (
+                    <div
+                      key={index}
+                      style={{
+                        display: 'flex',
+                        flexWrap: 'wrap',
+                        gap: '0.5rem',
+                        alignItems: 'center',
+                      }}
+                    >
+                      <input
+                        aria-labelledby="cats-label"
+                        value={row.name}
+                        onChange={(e) => setMetaCategoryRow(index, 'name', e.target.value)}
+                        placeholder="Name"
+                        style={{ flex: '1 1 10rem', minWidth: '8rem' }}
+                      />
+                      <input
+                        value={row.url}
+                        onChange={(e) => setMetaCategoryRow(index, 'url', e.target.value)}
+                        placeholder="URL (optional)"
+                        style={{ flex: '2 1 14rem', minWidth: '10rem' }}
+                      />
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        onClick={() => removeMetaCategoryRow(index)}
+                        aria-label={`Remove category row ${index + 1}`}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  style={{ marginTop: '0.5rem' }}
+                  onClick={addMetaCategoryRow}
+                  disabled={metaCategories.length >= 20}
+                >
+                  Add category
+                </button>
+              </div>
               <label htmlFor="add">Added date (ISO or text)</label>
               <input id="add" value={metaAddedAt} onChange={(e) => setMetaAddedAt(e.target.value)} />
               <label htmlFor="tagdraft">Tags</label>

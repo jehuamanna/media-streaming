@@ -9,7 +9,10 @@ type Root = {
   itemCount: number;
   pdfCount?: number;
   courseKind?: string;
-  courseMeta?: { tags?: string[] } | null;
+  courseMeta?: {
+    tags?: string[];
+    categories?: { name: string; url?: string | null }[];
+  } | null;
 };
 
 type ProgressRow = {
@@ -86,17 +89,43 @@ export default function Home() {
       ) : null}
       <div className="card-grid">
         {roots.map((r) => {
+          const categories = (r.courseMeta?.categories ?? []).filter((c) => c?.name?.trim());
           const tags = r.courseMeta?.tags?.filter(Boolean) ?? [];
           return (
           <Link key={r.id} className="tile" to={`/course/${encodeURIComponent(r.id)}`}>
             <strong>{r.name}</strong>
-            {tags.length > 0 ? (
+            {categories.length > 0 ? (
               <div
                 style={{
                   display: 'flex',
                   flexWrap: 'wrap',
                   gap: '0.25rem',
                   marginTop: '0.4rem',
+                }}
+              >
+                {categories.map((c) => (
+                  <span
+                    key={c.name}
+                    style={{
+                      fontSize: '0.72rem',
+                      padding: '0.08rem 0.35rem',
+                      borderRadius: 4,
+                      background: 'color-mix(in srgb, var(--accent) 18%, var(--surface))',
+                      color: 'var(--foreground)',
+                    }}
+                  >
+                    {c.name}
+                  </span>
+                ))}
+              </div>
+            ) : null}
+            {tags.length > 0 ? (
+              <div
+                style={{
+                  display: 'flex',
+                  flexWrap: 'wrap',
+                  gap: '0.25rem',
+                  marginTop: categories.length > 0 ? '0.25rem' : '0.4rem',
                 }}
               >
                 {tags.map((t) => (

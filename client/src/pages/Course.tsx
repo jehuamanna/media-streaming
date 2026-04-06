@@ -23,9 +23,10 @@ type PdfItem = {
   url: string;
 };
 
+type CourseCategory = { name: string; url: string | null };
+
 type CourseMeta = {
-  category: string | null;
-  categoryUrl: string | null;
+  categories?: CourseCategory[];
   addedAt: string | null;
   descriptionMarkdown: string | null;
   tags?: string[];
@@ -258,9 +259,10 @@ export default function Course() {
   const meta = root?.courseMeta;
   const durLabel = formatDuration(root?.durationSecondsTotal ?? undefined);
   const tagList = meta?.tags?.length ? meta.tags : [];
+  const categoryList = (meta?.categories ?? []).filter((c) => c?.name?.trim());
   const hasDetailStrip =
     durLabel ||
-    meta?.category ||
+    categoryList.length > 0 ||
     tagList.length > 0 ||
     root?.itemCount != null ||
     (root?.pdfCount ?? 0) > 0 ||
@@ -310,19 +312,32 @@ export default function Course() {
               <div>{durLabel}</div>
             </div>
           ) : null}
-          {meta?.category ? (
-            <div>
+          {categoryList.length > 0 ? (
+            <div style={{ flex: '1 1 100%', minWidth: 'min(100%, 12rem)' }}>
               <div style={{ fontSize: '0.7rem', color: 'var(--muted)', textTransform: 'uppercase' }}>
-                Category
+                Categories
               </div>
-              <div>
-                {meta.categoryUrl ? (
-                  <a href={meta.categoryUrl} target="_blank" rel="noreferrer">
-                    {meta.category}
-                  </a>
-                ) : (
-                  meta.category
-                )}
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem', marginTop: '0.25rem' }}>
+                {categoryList.map((c) => (
+                  <span
+                    key={c.name}
+                    style={{
+                      fontSize: '0.9rem',
+                      padding: '0.15rem 0.45rem',
+                      borderRadius: 6,
+                      background: 'var(--surface)',
+                      border: '1px solid var(--border)',
+                    }}
+                  >
+                    {c.url ? (
+                      <a href={c.url} target="_blank" rel="noreferrer">
+                        {c.name}
+                      </a>
+                    ) : (
+                      c.name
+                    )}
+                  </span>
+                ))}
               </div>
             </div>
           ) : null}
