@@ -221,7 +221,7 @@ export default function AdminUsers() {
       return;
     }
     setSelectedVisRootId((prev) =>
-      prev && visRoots.some((r) => r.id === prev) ? prev : visRoots[0].id,
+      prev && visRoots.some((r) => r.id === prev) ? prev : null,
     );
   }, [visRoots]);
 
@@ -849,88 +849,102 @@ export default function AdminUsers() {
                 </p>
               ) : null}
               <p style={{ color: 'var(--muted)', marginTop: visForUserId ? '0.5rem' : 0, marginBottom: 0 }}>
-                Left: use the checkbox to show or hide the entire course in the library
-                {visForUserId ? ' for this user' : ' for all learners'}. Click the course name to load that course’s
-                playlists, videos, and PDFs on the right (the name does not change visibility). Right: uncheck a
-                playlist or file to hide it. If the whole course is unchecked on the left, learners see nothing from
-                that course until the course is shown again; per-playlist and per-file choices apply only when the
-                course itself is visible.
+                Select a course on the left to load its videos and PDFs on the right. The course checkbox shows or hides
+                the whole course in the library
+                {visForUserId ? ' for this user' : ' for all learners'} (click the row to select; the checkbox only
+                toggles visibility). On the right, use playlist rows to hide an entire playlist, or individual rows for
+                each video or PDF. If the course is hidden, learners see nothing from it until you show it again.
               </p>
               {visLoading ? <p>Loading…</p> : null}
               <div className="admin-two-pane-head">
-                <div className="admin-two-pane-col-left">Courses (whole course on/off)</div>
-                <div className="admin-two-pane-col-right">Playlists & files for selected course</div>
+                <div className="admin-two-pane-col-left">Courses</div>
+                <div className="admin-two-pane-col-right">Videos & files</div>
               </div>
               <div className="admin-two-pane">
                 <div
                   className="admin-two-pane-col-left"
                   style={{
                     border: '1px solid var(--border)',
-                    borderRadius: '6px',
-                    padding: '0.5rem',
+                    borderRadius: 14,
+                    padding: '0.65rem',
                     display: 'flex',
                     flexDirection: 'column',
-                    gap: '0.15rem',
+                    gap: '0.45rem',
                     maxHeight: '70vh',
                     overflowY: 'auto',
                   }}
                 >
-                  {visRoots?.map((r) => (
-                    <div
-                      key={r.id}
-                      style={{
-                        display: 'flex',
-                        alignItems: 'flex-start',
-                        gap: '0.5rem',
-                        padding: '0.35rem 0.25rem',
-                        borderRadius: '4px',
-                        background:
-                          selectedVisRootId === r.id ? 'color-mix(in srgb, var(--border) 35%, transparent)' : undefined,
-                      }}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={!r.hidden}
-                        disabled={!!r.globalHidden}
-                        title={
-                          r.globalHidden
-                            ? 'Hidden for all users (change under All users)'
-                            : 'Show or hide the entire course in the library'
-                        }
-                        aria-label={`Show entire course in library: ${r.name}`}
-                        onChange={() => {
-                          if (r.globalHidden) return;
-                          toggleRootHidden(r.id);
-                        }}
-                        style={{ marginTop: '0.2rem' }}
-                      />
-                      <button
-                        type="button"
-                        title="Open this course’s playlists and files on the right"
-                        aria-label={`Select course ${r.name} for playlist and file visibility`}
+                  {visRoots?.map((r) => {
+                    const selected = selectedVisRootId === r.id;
+                    return (
+                      <div
+                        key={r.id}
+                        role="button"
+                        tabIndex={0}
+                        title="Show this course’s videos and files on the right"
+                        aria-current={selected ? 'true' : undefined}
+                        aria-label={`Course ${r.name}`}
                         onClick={() => setSelectedVisRootId(r.id)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            setSelectedVisRootId(r.id);
+                          }
+                        }}
                         style={{
-                          flex: 1,
-                          textAlign: 'left',
-                          background: 'none',
-                          border: 'none',
-                          color: 'inherit',
+                          display: 'flex',
+                          alignItems: 'flex-start',
+                          gap: '0.55rem',
+                          padding: '0.65rem 0.7rem',
+                          borderRadius: 12,
+                          border: '1px solid var(--border)',
+                          background: selected
+                            ? 'color-mix(in srgb, var(--border) 35%, transparent)'
+                            : 'var(--surface)',
                           cursor: 'pointer',
-                          fontWeight: selectedVisRootId === r.id ? 700 : 400,
-                          padding: 0,
+                          outline: 'none',
+                          opacity: r.hidden ? 0.72 : 1,
                         }}
                       >
-                        {r.name}
-                      </button>
-                    </div>
-                  ))}
+                        <input
+                          type="checkbox"
+                          checked={!r.hidden}
+                          disabled={!!r.globalHidden}
+                          title={
+                            r.globalHidden
+                              ? 'Hidden for all users (change under All users)'
+                              : 'Show or hide the entire course in the library'
+                          }
+                          aria-label={`Show entire course in library: ${r.name}`}
+                          onClick={(e) => e.stopPropagation()}
+                          onChange={() => {
+                            if (r.globalHidden) return;
+                            toggleRootHidden(r.id);
+                          }}
+                          style={{ marginTop: '0.15rem', flexShrink: 0 }}
+                        />
+                        <span
+                          style={{
+                            flex: 1,
+                            textAlign: 'left',
+                            fontWeight: selected ? 700 : 500,
+                            fontSize: '0.95rem',
+                            lineHeight: 1.35,
+                            color: r.hidden ? 'var(--muted)' : 'inherit',
+                          }}
+                        >
+                          {r.name}
+                        </span>
+                      </div>
+                    );
+                  })}
                 </div>
                 <div
                   className="admin-two-pane-col-right"
                   style={{
                     minHeight: '12rem',
                     border: '1px solid var(--border)',
-                    borderRadius: '6px',
+                    borderRadius: 14,
                     padding: '0.75rem',
                     overflowY: 'auto',
                     maxHeight: '70vh',
@@ -941,32 +955,43 @@ export default function AdminUsers() {
                     if (!r) {
                       return (
                         <p style={{ color: 'var(--muted)', margin: 0 }}>
-                          Click a course name on the left to list its playlists and files here.
+                          {visRoots?.length ? 'Select a course to list its videos.' : 'No courses found.'}
                         </p>
                       );
                     }
                     return (
                       <>
-                        <div style={{ fontWeight: 700, marginBottom: '0.75rem' }}>{r.name}</div>
+                        <div style={{ fontWeight: 700, marginBottom: '0.65rem' }}>{r.name}</div>
                         {r.hidden ? (
                           <p
                             style={{
                               color: 'var(--muted)',
                               margin: '0 0 0.75rem',
                               padding: '0.5rem 0.65rem',
-                              borderRadius: 6,
+                              borderRadius: 10,
                               border: '1px solid var(--border)',
                               background: 'color-mix(in srgb, var(--border) 22%, transparent)',
                             }}
                           >
-                            This course is hidden for learners, so nothing in it appears in the library. Check the
-                            course on the left to show it again. Playlist and file checkboxes below take effect once
-                            the course is visible.
+                            This course is hidden for learners, so nothing in it appears in the library. Show the
+                            course on the left to make playlist and file choices take effect.
                           </p>
                         ) : null}
                         {r.playlists.map((pl) => (
-                          <div key={pl.id} style={{ marginBottom: '1rem' }}>
-                            <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                          <div key={pl.id} style={{ marginBottom: '0.85rem' }}>
+                            <label
+                              style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '0.6rem',
+                                padding: '0.45rem 0.65rem',
+                                marginBottom: '0.35rem',
+                                borderRadius: 10,
+                                border: '1px solid var(--border)',
+                                background: 'var(--surface)',
+                                cursor: pl.globalHidden ? 'default' : 'pointer',
+                              }}
+                            >
                               <input
                                 type="checkbox"
                                 checked={!pl.hidden}
@@ -979,12 +1004,23 @@ export default function AdminUsers() {
                                   togglePlHidden(r.id, pl.id);
                                 }}
                               />
-                              Playlist: {pl.name}
+                              <span style={{ flex: 1, minWidth: 0, fontWeight: 600 }}>Playlist: {pl.name}</span>
                             </label>
-                            <ul style={{ listStyle: 'none', paddingLeft: '1rem', margin: '0.35rem 0 0' }}>
+                            <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
                               {pl.items.map((it) => (
-                                <li key={it.id}>
-                                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                <li key={it.id} style={{ marginBottom: '0.35rem' }}>
+                                  <label
+                                    style={{
+                                      display: 'flex',
+                                      alignItems: 'center',
+                                      gap: '0.6rem',
+                                      padding: '0.45rem 0.65rem',
+                                      borderRadius: 10,
+                                      border: '1px solid var(--border)',
+                                      background: 'var(--surface)',
+                                      cursor: it.globalHidden ? 'default' : 'pointer',
+                                    }}
+                                  >
                                     <input
                                       type="checkbox"
                                       checked={!it.hidden}
@@ -999,7 +1035,7 @@ export default function AdminUsers() {
                                         toggleItemHidden(r.id, pl.id, it.id);
                                       }}
                                     />
-                                    {it.title}
+                                    <span style={{ flex: 1, minWidth: 0, wordBreak: 'break-word' }}>{it.title}</span>
                                   </label>
                                 </li>
                               ))}
@@ -1007,12 +1043,34 @@ export default function AdminUsers() {
                           </div>
                         ))}
                         {r.pdfs.length > 0 ? (
-                          <div style={{ marginTop: '0.5rem' }}>
-                            <div style={{ fontWeight: 600, marginBottom: '0.35rem' }}>PDFs</div>
-                            <ul style={{ listStyle: 'none', paddingLeft: '0.5rem', margin: 0 }}>
+                          <div style={{ marginTop: '0.25rem' }}>
+                            <div
+                              style={{
+                                fontSize: '0.8rem',
+                                fontWeight: 600,
+                                color: 'var(--muted)',
+                                marginBottom: '0.35rem',
+                                textTransform: 'uppercase',
+                                letterSpacing: '0.03em',
+                              }}
+                            >
+                              PDFs
+                            </div>
+                            <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
                               {r.pdfs.map((p) => (
-                                <li key={p.id}>
-                                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                <li key={p.id} style={{ marginBottom: '0.35rem' }}>
+                                  <label
+                                    style={{
+                                      display: 'flex',
+                                      alignItems: 'center',
+                                      gap: '0.6rem',
+                                      padding: '0.45rem 0.65rem',
+                                      borderRadius: 10,
+                                      border: '1px solid var(--border)',
+                                      background: 'var(--surface)',
+                                      cursor: p.globalHidden ? 'default' : 'pointer',
+                                    }}
+                                  >
                                     <input
                                       type="checkbox"
                                       checked={!p.hidden}
@@ -1027,7 +1085,7 @@ export default function AdminUsers() {
                                         togglePdfHidden(r.id, p.id);
                                       }}
                                     />
-                                    {p.title}
+                                    <span style={{ flex: 1, minWidth: 0, wordBreak: 'break-word' }}>{p.title}</span>
                                   </label>
                                 </li>
                               ))}
